@@ -1,9 +1,10 @@
 [package]
 name = "freesynth-core"
+description = "Example-based image synthesis (PatchMatch + voting), CPU reference engine"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
-image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "bmp", "tga"] }
 rayon = { version = "1.12.0", default-features = false }
