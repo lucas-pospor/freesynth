@@ -4,9 +4,9 @@
 //! carry information: 1 for grey images, 3 for colour, plus 1 if any pixel is not fully opaque.
 //! It always writes PNG.
 //!
-//! Loading matches stb_image byte for byte: JPEG files go through a translation of stb_image's
-//! own decoder (used by [`decode_rgba`]); PNG, BMP and TGA are lossless, so any
-//! correct decoder gives stb_image's pixels, and 16-bit images are reduced like stb_image does.
+//! Decoding uses the `image` crate. Lossless formats (PNG, BMP, TGA) give the same pixels as
+//! stb_image and 16-bit images are reduced the same way; JPEG pixels can differ slightly because
+//! decoders use different IDCTs and chroma upsampling.
 
 use std::io::Cursor;
 use std::path::Path;
@@ -15,7 +15,6 @@ use image::{DynamicImage, ExtendedColorType, ImageError, ImageFormat, ImageReade
 
 use crate::error::{Error, invalid};
 use crate::image::Image;
-use crate::jpeg;
 
 /// Loads an image file as 8-bit RGBA, like `stbi_load(path, ..., 4)`.
 ///
@@ -31,10 +30,6 @@ pub fn load_rgba(path: impl AsRef<Path>) -> Result<Image, Error> {
 /// Decodes an in-memory image file as 8-bit RGBA with the same rules as [`load_rgba`].
 /// `fallback` is the format to assume when the contents have no recognisable signature.
 pub fn decode_rgba(bytes: &[u8], fallback: Option<ImageFormat>) -> Result<Image, Error> {
-    // stb_image tries JPEG first, with the same test (the first marker is SOI).
-    if jpeg::is_jpeg(bytes) {
-        return jpeg::decode_rgba(bytes);
-    }
     let mut reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format().map_err(ImageError::IoError)?;
     if reader.format().is_none()
         && let Some(f) = fallback

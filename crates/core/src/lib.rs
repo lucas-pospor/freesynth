@@ -22,7 +22,6 @@
 mod error;
 mod image;
 pub mod io;
-mod jpeg;
 mod mask;
 mod nnf;
 mod patch;
