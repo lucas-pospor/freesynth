@@ -1,0 +1,17 @@
+[package]
+name = "freesynth-scenes"
+description = "Procedural test sequences with exact optical flow and ground-truth stylizations for FreeSynth"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "freesynth-scenes"
+path = "src/main.rs"
+
+[dependencies]
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+libm = "0.2.16"
+rayon = { version = "1.12.0", default-features = false }
+serde = { version = "1.0.228", features = ["derive"] }
+toml = "1.1.6"

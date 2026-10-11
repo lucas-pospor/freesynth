@@ -9,3 +9,8 @@ bytemuck = { version = "1.25.2", features = ["derive"] }
 freesynth-core = { version = "0.1.0", path = "../core" }
 pollster = "1.0.1"
 wgpu = "30.0.1"
+
+[dev-dependencies]
+freesynth-eval = { version = "0.1.0", path = "../eval" }
+freesynth-scenes = { version = "0.1.0", path = "../scenes" }
+image = { version = "0.25.10", default-features = false }

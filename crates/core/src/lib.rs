@@ -25,6 +25,7 @@ pub mod io;
 mod mask;
 mod nnf;
 mod patch;
+mod patch_error;
 mod patchmatch;
 mod pyramid;
 mod rng;
@@ -34,6 +35,7 @@ mod vote;
 pub use crate::error::Error;
 pub use crate::image::{Image, Nnf};
 pub use crate::nnf::{nnf_init_random, nnf_upscale};
+pub use crate::patch_error::{ErrorPart, NnfErrors, PatchDistance, PatchErrorEvaluator, nnf_patch_errors};
 pub use crate::pyramid::{max_pyramid_levels, pyramid_level_size, resample};
 pub use crate::rng::GlibcRand;
 pub use crate::synth::{

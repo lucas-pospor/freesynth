@@ -1,0 +1,88 @@
+# FreeSynth test corpus.
+#
+# Every scene below is generated on demand by `freesynth-scenes` from its parameters; the images
+# are not stored in the repository. Generated scenes are CC0 1.0. Generate them with
+#
+#   cargo run --release -p freesynth-scenes -- corpus corpus/manifest.toml corpus/generated --tier all
+#
+# `params` takes the generator fields (width, height, frames, seed, family, keyframes, objects,
+# motion, flow_gaps); anything left out takes its default (480x270, 30 frames, seed 1, rigid,
+# keyframes = first and last frame, 3 objects, motion 1, flow gap 1).
+#
+# Scenes with the same seed and size share the same input video and flow, so the three style
+# families can be compared on identical footage.
+#
+# Real footage is not listed here: `corpus/fetch-clips.sh` downloads a few openly licensed clips
+# into corpus/external/ with their attribution.
+
+format_version = 1
+
+# CI tier: tiny cases that generate in milliseconds.
+
+[[scene]]
+name = "tiny-rigid"
+tier = "ci"
+description = "Smallest case; style fixed on the surfaces"
+params = { width = 64, height = 48, frames = 6, family = "rigid", flow_gaps = [5] }
+
+[[scene]]
+name = "tiny-painterly"
+tier = "ci"
+description = "Same footage, painterly strokes re-rendered each frame"
+params = { width = 64, height = 48, frames = 6, family = "painterly", flow_gaps = [5] }
+
+[[scene]]
+name = "tiny-hatching"
+tier = "ci"
+description = "Same footage, screen-space hatching"
+params = { width = 64, height = 48, frames = 6, family = "hatching", flow_gaps = [5] }
+
+[[scene]]
+name = "small-painterly"
+tier = "ci"
+description = "A little larger and longer, for quick video checks"
+params = { width = 128, height = 72, frames = 12, seed = 2, family = "painterly", flow_gaps = [5] }
+
+# Full tier.
+
+[[scene]]
+name = "orbit-rigid"
+tier = "full"
+description = "Reference scene: pan, three objects with rotation, scale changes and occlusion"
+params = { family = "rigid", flow_gaps = [5] }
+
+[[scene]]
+name = "orbit-painterly"
+tier = "full"
+description = "Reference footage with a non-rigid painterly ground truth"
+params = { family = "painterly", flow_gaps = [5] }
+
+[[scene]]
+name = "orbit-hatching"
+tier = "full"
+description = "Reference footage with screen-space hatching"
+params = { family = "hatching", flow_gaps = [5] }
+
+[[scene]]
+name = "long-rigid"
+tier = "full"
+description = "100 frames, for position-field drift and keyframe intervals"
+params = { frames = 100, seed = 4, family = "rigid", keyframes = [0, 99], flow_gaps = [5] }
+
+[[scene]]
+name = "long-painterly"
+tier = "full"
+description = "100 frames with a non-rigid ground truth"
+params = { frames = 100, seed = 4, family = "painterly", keyframes = [0, 99], flow_gaps = [5] }
+
+[[scene]]
+name = "fast-painterly"
+tier = "full"
+description = "Double speed, five objects: large displacements and frequent occlusion"
+params = { seed = 7, objects = 5, motion = 2.0, family = "painterly", flow_gaps = [5] }
+
+[[scene]]
+name = "wide-rigid"
+tier = "full"
+description = "960x540, the size of typical engine benchmarks"
+params = { width = 960, height = 540, seed = 3, family = "rigid", flow_gaps = [5] }

@@ -7,14 +7,16 @@
 //! Decoding uses the `image` crate. Lossless formats (PNG, BMP, TGA) give the same pixels as
 //! stb_image and 16-bit images are reduced the same way; JPEG pixels can differ slightly because
 //! decoders use different IDCTs and chroma upsampling.
+//!
+//! Nearest-neighbour fields can be stored in a small binary format (see [`write_nnf`]).
 
-use std::io::Cursor;
+use std::io::{Cursor, Read, Write};
 use std::path::Path;
 
 use image::{DynamicImage, ExtendedColorType, ImageError, ImageFormat, ImageReader};
 
 use crate::error::{Error, invalid};
-use crate::image::Image;
+use crate::image::{Image, Nnf};
 
 /// Loads an image file as 8-bit RGBA, like `stbi_load(path, ..., 4)`.
 ///
@@ -119,9 +121,92 @@ pub fn save(img: &Image, path: impl AsRef<Path>) -> Result<(), Error> {
     Ok(())
 }
 
+/// Magic bytes at the start of an NNF file.
+pub const NNF_MAGIC: &[u8; 6] = b"FSNNF1";
+
+/// Writes a nearest-neighbour field in the FreeSynth NNF format.
+///
+/// The format is little-endian and has no padding:
+///
+/// | Offset | Size | Contents |
+/// |---|---|---|
+/// | 0 | 6 | magic `FSNNF1` (ASCII) |
+/// | 6 | 4 | width, `u32` |
+/// | 10 | 4 | height, `u32` |
+/// | 14 | 8 * width * height | for every target pixel in scan-line order, the source patch centre as `i32` x then `i32` y |
+pub fn write_nnf(nnf: &Nnf, mut w: impl Write) -> Result<(), Error> {
+    let (width, height) = (u32::try_from(nnf.width()), u32::try_from(nnf.height()));
+    let (Ok(width), Ok(height)) = (width, height) else {
+        return invalid("NNF is too large for the file format");
+    };
+    let mut buf = Vec::with_capacity(14 + nnf.data().len() * 8);
+    buf.extend_from_slice(NNF_MAGIC);
+    buf.extend_from_slice(&width.to_le_bytes());
+    buf.extend_from_slice(&height.to_le_bytes());
+    for &[x, y] in nnf.data() {
+        buf.extend_from_slice(&x.to_le_bytes());
+        buf.extend_from_slice(&y.to_le_bytes());
+    }
+    w.write_all(&buf)?;
+    Ok(())
+}
+
+/// Reads a nearest-neighbour field written by [`write_nnf`].
+pub fn read_nnf(mut r: impl Read) -> Result<Nnf, Error> {
+    let mut header = [0u8; 14];
+    r.read_exact(&mut header).map_err(|_| Error::InvalidInput("not an NNF file (too short)".into()))?;
+    if &header[..6] != NNF_MAGIC {
+        return invalid("not an NNF file (bad magic)");
+    }
+    let width = u32::from_le_bytes(header[6..10].try_into().expect("4 bytes")) as usize;
+    let height = u32::from_le_bytes(header[10..14].try_into().expect("4 bytes")) as usize;
+    let Some(len) = width.checked_mul(height).and_then(|n| n.checked_mul(8)) else {
+        return invalid("NNF size overflows");
+    };
+    let mut body = Vec::new();
+    r.take(len as u64 + 1).read_to_end(&mut body)?;
+    if body.len() != len {
+        return invalid(format!("NNF file holds {} data bytes, expected {len} for {width}x{height}", body.len()));
+    }
+    let data = body
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|c| {
+            let x = i32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+            let y = i32::from_le_bytes([c[4], c[5], c[6], c[7]]);
+            [x, y]
+        })
+        .collect();
+    Ok(Nnf::from_raw(width, height, data))
+}
+
+/// Saves a nearest-neighbour field to a file (see [`write_nnf`]).
+pub fn save_nnf(nnf: &Nnf, path: impl AsRef<Path>) -> Result<(), Error> {
+    // `write_nnf` assembles the whole file in memory and writes it at once, so no buffering is
+    // needed (and no write error can be lost in a buffer dropped without flushing).
+    write_nnf(nnf, std::fs::File::create(path)?)
+}
+
+/// Loads a nearest-neighbour field from a file (see [`write_nnf`]).
+pub fn load_nnf(path: impl AsRef<Path>) -> Result<Nnf, Error> {
+    let file = std::fs::File::open(path)?;
+    read_nnf(std::io::BufReader::new(file))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A scratch directory on disk under the build directory (the system temp directory may be
+    /// RAM-backed).
+    fn scratch_dir(name: &str) -> std::path::PathBuf {
+        let target = std::env::var_os("CARGO_TARGET_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target"));
+        target.join("tmp").join(format!("{name}-{}", std::process::id()))
+    }
+
 
     fn rgba(px: &[[u8; 4]]) -> Image {
         Image::from_raw(px.len(), 1, 4, px.iter().flatten().copied().collect())
@@ -146,7 +231,7 @@ mod tests {
 
     #[test]
     fn png_round_trip() {
-        let dir = std::env::temp_dir().join(format!("freesynth-io-{}", std::process::id()));
+        let dir = scratch_dir("freesynth-io");
         std::fs::create_dir_all(&dir).unwrap();
         for nc in 1..=4 {
             let img = Image::from_raw(3, 2, nc, (0..6 * nc).map(|v| (v * 40) as u8).collect());
@@ -164,5 +249,32 @@ mod tests {
             assert_eq!(select_channels(&load_rgba(&bare).unwrap(), nc), img);
         }
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn nnf_round_trip() {
+        let nnf = Nnf::from_raw(3, 2, vec![[0, 0], [1, -2], [i32::MAX, i32::MIN], [7, 8], [9, 10], [11, 12]]);
+        let mut buf = Vec::new();
+        write_nnf(&nnf, &mut buf).unwrap();
+        assert_eq!(buf.len(), 14 + 6 * 8);
+        assert_eq!(&buf[..6], b"FSNNF1");
+        assert_eq!(&buf[6..14], &[3, 0, 0, 0, 2, 0, 0, 0]);
+        assert_eq!(&buf[22..30], &[1, 0, 0, 0, 0xfe, 0xff, 0xff, 0xff]);
+        assert_eq!(read_nnf(buf.as_slice()).unwrap(), nnf);
+
+        // Truncated, padded and mislabelled files are rejected.
+        assert!(read_nnf(&buf[..buf.len() - 1]).is_err());
+        let mut long = buf.clone();
+        long.push(0);
+        assert!(read_nnf(long.as_slice()).is_err());
+        let mut bad = buf.clone();
+        bad[0] = b'X';
+        assert!(read_nnf(bad.as_slice()).is_err());
+        assert!(read_nnf(&buf[..10]).is_err());
+
+        let empty = Nnf::new(0, 0);
+        let mut buf = Vec::new();
+        write_nnf(&empty, &mut buf).unwrap();
+        assert_eq!(read_nnf(buf.as_slice()).unwrap(), empty);
     }
 }

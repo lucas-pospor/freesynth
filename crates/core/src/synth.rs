@@ -229,7 +229,7 @@ impl SynthesisInput {
         })
     }
 
-    fn validate(&self) -> Result<(), Error> {
+    pub(crate) fn validate(&self) -> Result<(), Error> {
         let ns = self.source_style.channels();
         let ng = self.source_guide.channels();
         if !(1..=MAX_STYLE_CHANNELS).contains(&ns) {

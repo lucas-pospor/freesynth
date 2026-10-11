@@ -34,3 +34,19 @@ thread by default), `-deterministic` (same output for a given seed and band coun
 The output is always written as PNG, whatever the file name.
 
 The library entry point is `freesynth_core::synthesize` (see `crates/core/src/lib.rs`).
+
+## Evaluation tools
+
+`freesynth-eval` measures synthesis quality. It computes patch energy from a saved
+nearest-neighbour field (`freesynth -dumpnnf`) or exactly on sampled pixels, how much of the
+source gets used, and sharpness. For video it measures temporal warping error against an external
+optical flow. `freesynth-eval compare` compares runs in pairs with bootstrap and t intervals.
+
+`freesynth-scenes` generates CC0 test sequences with exact optical flow and ground-truth
+stylizations. `corpus/manifest.toml` lists the scenes, and `corpus/fetch-clips.sh` downloads a few
+Creative Commons clips together with their attribution.
+
+```bash
+cargo run --release -p freesynth-scenes -- corpus corpus/manifest.toml corpus/generated --tier ci
+cargo test -p freesynth-eval --test ci_quick
+```

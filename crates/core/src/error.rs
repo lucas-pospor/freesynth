@@ -7,6 +7,8 @@ pub enum Error {
     InvalidInput(String),
     /// Decoding or encoding an image failed.
     Image(image::ImageError),
+    /// Reading or writing a non-image file failed.
+    Io(std::io::Error),
 }
 
 impl fmt::Display for Error {
@@ -14,6 +16,7 @@ impl fmt::Display for Error {
         match self {
             Error::InvalidInput(msg) => f.write_str(msg),
             Error::Image(e) => write!(f, "{e}"),
+            Error::Io(e) => write!(f, "{e}"),
         }
     }
 }
@@ -22,6 +25,7 @@ impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Error::Image(e) => Some(e),
+            Error::Io(e) => Some(e),
             Error::InvalidInput(_) => None,
         }
     }
@@ -30,6 +34,12 @@ impl std::error::Error for Error {
 impl From<image::ImageError> for Error {
     fn from(e: image::ImageError) -> Self {
         Error::Image(e)
+    }
+}
+
+impl From<std::io::Error> for Error {
+    fn from(e: std::io::Error) -> Self {
+        Error::Io(e)
     }
 }
 

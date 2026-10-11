@@ -42,6 +42,7 @@ fn print_usage(program: &str) {
     println!("  -bands <number>       PatchMatch bands (default: one per thread)");
     println!("  -deterministic        reproducible results for a given seed and band count");
     println!("  -bitexact             match the 2019 CPU build exactly (use with -threads 1)");
+    println!("  -dumpnnf <file.nnf>   also write the final nearest-neighbour field (FSNNF1 format)");
     println!();
 }
 
@@ -64,6 +65,8 @@ struct Options {
     bands: i32,
     deterministic: bool,
     bit_exact: bool,
+    /// Where to write the final nearest-neighbour field, if anywhere.
+    dump_nnf: Option<String>,
 }
 
 struct GuideArg {
@@ -185,6 +188,7 @@ fn parse_args(args: &[String]) -> Result<Options, u8> {
         bands: 0,
         deterministic: false,
         bit_exact: false,
+        dump_nnf: None,
     };
     let mut weight_target = WeightTarget::None;
     let mut p = Parser { args, i: 1 };
@@ -313,6 +317,9 @@ fn parse_args(args: &[String]) -> Result<Options, u8> {
             o.bit_exact = true;
             continue;
         }
+        try_opt!(p.string("-dumpnnf"), |v| {
+            o.dump_nnf = Some(v);
+        });
         println!("error: unrecognized option '{}'", args[p.i]);
         return Err(1);
     }
@@ -428,6 +435,14 @@ fn run_inner(args: &[String]) -> Result<(), u8> {
         return Err(1);
     }
     println!("result was written to {}", o.output_file);
+    if let Some(path) = &o.dump_nnf {
+        if let Err(e) = io::save_nnf(&output.nnf, path) {
+            println!("error: failed to write '{path}'");
+            println!("{e}");
+            return Err(1);
+        }
+        println!("nnf was written to {path}");
+    }
     Ok(())
 }
 
@@ -453,6 +468,14 @@ mod tests {
         assert_eq!(o.style_weight, -1.0);
         assert_eq!(o.guides[0].weight, -1.0);
         assert_eq!(o.backend, Backend::Cpu);
+        assert_eq!(o.dump_nnf, None);
+    }
+
+    #[test]
+    fn dump_nnf_takes_a_path() {
+        let o = parse_args(&args("-style s.png -guide a b -dumpnnf out.nnf")).ok().unwrap();
+        assert_eq!(o.dump_nnf.as_deref(), Some("out.nnf"));
+        assert!(parse_args(&args("-style s.png -dumpnnf")).is_err());
     }
 
     #[test]

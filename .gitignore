@@ -1,1 +1,4 @@
 /target/
+# Corpus material fetched or generated on demand (CC BY clips are never committed)
+/corpus/external/
+/corpus/generated/

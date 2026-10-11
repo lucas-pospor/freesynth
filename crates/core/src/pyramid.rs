@@ -129,9 +129,9 @@ mod tests {
 
     #[test]
     fn max_levels_matches_cli_rule() {
-        // texbynum: 320x462, patch 3 -> coarsest min side must be >= 7: 320>>5 = 10, 320>>6 = 5.
+        // 320x462, patch 3 -> coarsest min side must be >= 7: 320>>5 = 10, 320>>6 = 5.
         assert_eq!(max_pyramid_levels((320, 462), (320, 462), 3), 6);
-        // stylit: 1200x912, patch 5 -> >= 11: 912>>6 = 14, 912>>7 = 7.
+        // 1200x912, patch 5 -> >= 11: 912>>6 = 14, 912>>7 = 7.
         assert_eq!(max_pyramid_levels((1200, 912), (1200, 912), 5), 7);
         // The smaller of source and target decides.
         assert_eq!(max_pyramid_levels((1200, 912), (100, 100), 5), 4);
