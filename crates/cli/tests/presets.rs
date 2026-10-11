@@ -69,7 +69,10 @@ fn presets_print_their_schedule() {
     assert!(text.contains("preset: compat") && text.contains("stopmask: on\nvote: weighted (truncated)"), "{text}");
     let (ok, text) = s.run(&["-output", &out, "-preset", "fast", "-backend", "cpu", "-patchmatchiters", "3"]);
     assert!(ok, "{text}");
-    assert!(text.contains("preset: fast") && text.contains("patchmatchiters: 3") && text.contains("searchvoteiters: 6"), "{text}");
+    assert!(
+        text.contains("preset: fast") && text.contains("patchmatchiters: 3") && text.contains("searchvoteiters: 6"),
+        "{text}"
+    );
     let (ok, text) = s.run(&["-output", &out, "-preset", "turbo"]);
     assert!(!ok && text.contains("unknown preset"), "{text}");
 }

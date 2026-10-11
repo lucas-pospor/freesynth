@@ -75,7 +75,8 @@ impl ImageSequence {
         let mut naming: Option<(String, String)> = None;
         for entry in fs::read_dir(dir).map_err(io_error(dir))? {
             let path = entry.map_err(io_error(dir))?.path();
-            let (Some(stem), Some(ext)) = (path.file_stem().and_then(|s| s.to_str()), path.extension().and_then(|s| s.to_str()))
+            let (Some(stem), Some(ext)) =
+                (path.file_stem().and_then(|s| s.to_str()), path.extension().and_then(|s| s.to_str()))
             else {
                 continue;
             };
@@ -93,7 +94,9 @@ impl ImageSequence {
                 }
                 Some(_) => {}
             }
-            let number: usize = digits.parse().map_err(|_| VideoError::InvalidInput(format!("frame number too large in '{}'", path.display())))?;
+            let number: usize = digits
+                .parse()
+                .map_err(|_| VideoError::InvalidInput(format!("frame number too large in '{}'", path.display())))?;
             if found.insert(number, path).is_some() {
                 return invalid(format!("frame {number} appears twice in '{}'", dir.display()));
             }
@@ -145,9 +148,10 @@ impl ImageSequence {
 
 /// Splits a frame pattern into directory, file name prefix, number width and suffix.
 fn split_pattern(pattern: &Path) -> Result<(PathBuf, String, usize, String), VideoError> {
-    let name = pattern.file_name().and_then(|s| s.to_str()).ok_or_else(|| {
-        VideoError::InvalidInput(format!("frame pattern '{}' has no file name", pattern.display()))
-    })?;
+    let name = pattern
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| VideoError::InvalidInput(format!("frame pattern '{}' has no file name", pattern.display())))?;
     let Some(end) = name.rfind('#') else {
         return invalid(format!("frame pattern '{}' has no '#' for the frame number", pattern.display()));
     };
@@ -178,7 +182,9 @@ impl FrameSource for ImageSequence {
     }
 
     fn load(&self, frame: usize) -> Result<Image, VideoError> {
-        let path = self.path(frame).ok_or_else(|| VideoError::InvalidInput(format!("frame {frame} is not in the sequence")))?;
+        let path = self
+            .path(frame)
+            .ok_or_else(|| VideoError::InvalidInput(format!("frame {frame} is not in the sequence")))?;
         io::load_rgba(path).map_err(|source| VideoError::Load { path: path.to_owned(), source })
     }
 }
@@ -253,7 +259,11 @@ impl<'a> FrameCache<'a> {
     /// Frame `frame` (RGBA), decoded on first use.
     pub fn get(&self, frame: usize) -> Result<Arc<Image>, VideoError> {
         if !self.source.contains(frame) {
-            return invalid(format!("frame {frame} is outside the shot ({}-{})", self.source.first(), self.source.last()));
+            return invalid(format!(
+                "frame {frame} is outside the shot ({}-{})",
+                self.source.first(),
+                self.source.last()
+            ));
         }
         if let Some(image) = self.store.get(&frame)? {
             return Ok(image);

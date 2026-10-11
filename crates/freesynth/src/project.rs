@@ -163,7 +163,14 @@ pub struct Guides {
 impl Default for Guides {
     fn default() -> Self {
         let w = GuideWeights::CLASSIC;
-        Self { style: w.style, video: w.video, temporal: w.temporal, mapping: w.mapping, mask: w.mask, gate_mapping: false }
+        Self {
+            style: w.style,
+            video: w.video,
+            temporal: w.temporal,
+            mapping: w.mapping,
+            mask: w.mask,
+            gate_mapping: false,
+        }
     }
 }
 
@@ -211,7 +218,6 @@ pub struct OutputSettings {
     #[serde(with = "by_name")]
     pub keyframes: KeyframeOutput,
 }
-
 
 /// A keyframe video project.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -316,9 +322,20 @@ impl Project {
     pub fn video_params(&self) -> Result<VideoParams, Error> {
         let g = &self.guides;
         let e = &self.engine;
-        let synthesis = Params { uniformity_weight: e.uniformity, patch_size: e.patch_size, seed: e.seed, ..Params::with_preset(e.preset) };
+        let synthesis = Params {
+            uniformity_weight: e.uniformity,
+            patch_size: e.patch_size,
+            seed: e.seed,
+            ..Params::with_preset(e.preset)
+        };
         let params = VideoParams {
-            weights: GuideWeights { style: g.style, video: g.video, temporal: g.temporal, mapping: g.mapping, mask: g.mask },
+            weights: GuideWeights {
+                style: g.style,
+                video: g.video,
+                temporal: g.temporal,
+                mapping: g.mapping,
+                mask: g.mask,
+            },
             synthesis,
             gate_mapping: g.gate_mapping,
             blend: self.output.blend,

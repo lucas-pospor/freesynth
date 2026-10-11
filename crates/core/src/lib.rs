@@ -56,8 +56,7 @@ pub use crate::pyramid::{max_pyramid_levels, pyramid_level_size, resample};
 pub use crate::rng::GlibcRand;
 pub use crate::schedule::{Engine, Preset, Schedule, SearchMode};
 pub use crate::synth::{
-    GuideLayer, OmegaSync, Params, PerLevel, SynthesisInput, SynthesisOutput, VoteMode,
-    synthesize,
+    GuideLayer, OmegaSync, Params, PerLevel, SynthesisInput, SynthesisOutput, VoteMode, synthesize,
 };
 pub use crate::vote::{VoteRounding, vote_plain, vote_weighted};
 

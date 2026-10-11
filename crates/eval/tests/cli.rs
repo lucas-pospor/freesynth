@@ -12,7 +12,8 @@ struct Scratch(PathBuf);
 
 impl Scratch {
     fn new(name: &str) -> Self {
-        let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("freesynth-eval-cli-{name}-{}", std::process::id()));
+        let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+            .join(format!("freesynth-eval-cli-{name}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         Self(dir)
     }
@@ -79,7 +80,9 @@ fn problem(s: &Scratch) -> Vec<String> {
     let out = synthesize(&input, &Params { num_threads: Some(2), ..Params::default() }).unwrap();
     io::save_png(&out.image, s.path("out.png")).unwrap();
     io::save_nnf(&out.nnf, s.path("out.nnf")).unwrap();
-    ["-style", &s.path("style.png"), "-guide", &s.path("src.png"), &s.path("tgt.png"), "-weight", "2"].map(String::from).to_vec()
+    ["-style", &s.path("style.png"), "-guide", &s.path("src.png"), &s.path("tgt.png"), "-weight", "2"]
+        .map(String::from)
+        .to_vec()
 }
 
 #[test]
@@ -88,7 +91,8 @@ fn energy_sampled_and_occupancy() {
     let layers = problem(&s);
     // `cmd`, the layer arguments, then `extra`.
     let call = |cmd: &str, extra: &[&str]| {
-        let all: Vec<&str> = std::iter::once(cmd).chain(layers.iter().map(String::as_str)).chain(extra.iter().copied()).collect();
+        let all: Vec<&str> =
+            std::iter::once(cmd).chain(layers.iter().map(String::as_str)).chain(extra.iter().copied()).collect();
         run(&all)
     };
 
@@ -106,7 +110,12 @@ fn energy_sampled_and_occupancy() {
     let sm = report(&s.path("s.json"));
     assert_eq!(sm.pixels.as_ref().unwrap().coords.len(), 36 * 30);
     assert!(sm.metrics["total"] <= m["total"] + 1e-6);
-    assert!((sm.metrics["nnf_total"] - m["total"]).abs() < 1e-3 * m["total"], "{} vs {}", sm.metrics["nnf_total"], m["total"]);
+    assert!(
+        (sm.metrics["nnf_total"] - m["total"]).abs() < 1e-3 * m["total"],
+        "{} vs {}",
+        sm.metrics["nnf_total"],
+        m["total"]
+    );
     for (exact, total) in sm.samples["total"].values.iter().zip(&sm.samples["style"].values) {
         assert!(exact >= total);
     }
@@ -119,11 +128,33 @@ fn energy_sampled_and_occupancy() {
         }
     }
     io::save_png(&img, s.path("damaged.png")).unwrap();
-    call("sampled", &["--image", &s.path("damaged.png"), "--pixels", &s.path("s.json"), "--json", &s.path("d.json"), "--label", "damaged"]);
+    call(
+        "sampled",
+        &[
+            "--image",
+            &s.path("damaged.png"),
+            "--pixels",
+            &s.path("s.json"),
+            "--json",
+            &s.path("d.json"),
+            "--label",
+            "damaged",
+        ],
+    );
     let d = report(&s.path("d.json"));
     assert_eq!(d.pixels, sm.pixels);
     assert!(d.metrics["total"] > sm.metrics["total"]);
-    run(&["compare", &s.path("s.json"), &s.path("d.json"), "--resamples", "500", "--json", &s.path("c.json"), "--markdown", &s.path("c.md")]);
+    run(&[
+        "compare",
+        &s.path("s.json"),
+        &s.path("d.json"),
+        "--resamples",
+        "500",
+        "--json",
+        &s.path("c.json"),
+        "--markdown",
+        &s.path("c.md"),
+    ]);
     let c: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(s.path("c.json")).unwrap()).unwrap();
     let total = c["rows"].as_array().unwrap().iter().find(|r| r["metric"] == "total").unwrap();
     assert_eq!(total["level"], "samples");
@@ -147,7 +178,16 @@ fn energy_sampled_and_occupancy() {
 
     // Bad input is reported, not ignored.
     run_fails(&["energy", "--image", &out]);
-    run_fails(&["sampled", "-style", &s.path("style.png"), "-guide", &s.path("src.png"), &s.path("tgt.png"), "--image", &s.path("style.png")]);
+    run_fails(&[
+        "sampled",
+        "-style",
+        &s.path("style.png"),
+        "-guide",
+        &s.path("src.png"),
+        &s.path("tgt.png"),
+        "--image",
+        &s.path("style.png"),
+    ]);
     run_fails(&["frobnicate"]);
 }
 
@@ -164,7 +204,11 @@ fn sharpness_and_temporal() {
         io::save_png(&img, s.path(&format!("frames/{t:05}.png"))).unwrap();
         let mut f = img.clone();
         if t % 2 == 1 {
-            f.data_mut().iter_mut().enumerate().filter(|(i, _)| i % 4 != 3).for_each(|(_, v)| *v = (*v as f32 * 0.85) as u8);
+            f.data_mut()
+                .iter_mut()
+                .enumerate()
+                .filter(|(i, _)| i % 4 != 3)
+                .for_each(|(_, v)| *v = (*v as f32 * 0.85) as u8);
         }
         io::save_png(&f, s.path(&format!("flicker/{t:05}.png"))).unwrap();
         if t + 1 < n {
@@ -181,13 +225,35 @@ fn sharpness_and_temporal() {
     assert_eq!(t.samples["warp5"].values.len(), n - 5);
 
     let out = s.path("multi");
-    let md = run(&["temporal", "--frames", &format!("steady={}", s.path("frames")), "--frames", &format!("flicker={}", s.path("flicker")), "--flow-fw", &fw, "--flow-bw", &bw, "--out-dir", &out]);
+    let md = run(&[
+        "temporal",
+        "--frames",
+        &format!("steady={}", s.path("frames")),
+        "--frames",
+        &format!("flicker={}", s.path("flicker")),
+        "--flow-fw",
+        &fw,
+        "--flow-bw",
+        &bw,
+        "--out-dir",
+        &out,
+    ]);
     assert!(md.contains("| steady |") && md.contains("| flicker |"));
     let (a, b) = (report(&format!("{out}/steady.json")), report(&format!("{out}/flicker.json")));
     assert!(b.metrics["warp1"] > 20.0 * a.metrics["warp1"]);
     assert!(b.metrics["global_flicker"] > a.metrics["global_flicker"]);
     assert_eq!(a.samples["warp1"].key, b.samples["warp1"].key);
-    run_fails(&["temporal", "--frames", &s.path("frames"), "--frames", &s.path("flicker"), "--flow-fw", &fw, "--flow-bw", &bw]);
+    run_fails(&[
+        "temporal",
+        "--frames",
+        &s.path("frames"),
+        "--frames",
+        &s.path("flicker"),
+        "--flow-fw",
+        &fw,
+        "--flow-bw",
+        &bw,
+    ]);
 
     // Two runs in the usual <run>/frames layout are named after the run, not both 'frames'.
     for run_dir in ["runA/frames", "runB/frames"] {
@@ -197,7 +263,8 @@ fn sharpness_and_temporal() {
         }
     }
     let (ra, rb, rep) = (s.path("runA/frames"), s.path("runB/frames"), s.path("rep"));
-    let md = run(&["temporal", "--frames", &ra, "--frames", &rb, "--flow-fw", &fw, "--flow-bw", &bw, "--out-dir", &rep]);
+    let md =
+        run(&["temporal", "--frames", &ra, "--frames", &rb, "--flow-fw", &fw, "--flow-bw", &bw, "--out-dir", &rep]);
     assert!(md.contains("| runA |") && md.contains("| runB |"), "{md}");
     assert!(report(&format!("{rep}/runA.json")).metrics.contains_key("warp1"));
     assert!(report(&format!("{rep}/runB.json")).metrics.contains_key("warp1"));
@@ -205,7 +272,9 @@ fn sharpness_and_temporal() {
     let flows = ["--flow-fw", fw.as_str(), "--flow-bw", bw.as_str(), "--out-dir", rep.as_str()];
     let same = [format!("x={ra}"), format!("x={rb}")];
     run_fails(&[&["temporal", "--frames", &same[0], "--frames", &same[1]][..], &flows].concat());
-    run_fails(&[&["temporal", "--frames", &s.path("runA/frames"), "--frames", &s.path("runA/frames")][..], &flows].concat());
+    run_fails(
+        &[&["temporal", "--frames", &s.path("runA/frames"), "--frames", &s.path("runA/frames")][..], &flows].concat(),
+    );
     let odd = format!("a b={ra}");
     run_fails(&[&["temporal", "--frames", &odd][..], &flows].concat());
     // Frame ranges outside the frames present are errors, not silently clipped.
@@ -221,7 +290,15 @@ fn sharpness_and_temporal() {
     run(&["sharpness", "--image", &f0, "--reference", &f0, "--json", &s.path("sh.json")]);
     let sh = report(&s.path("sh.json"));
     assert!((sh.metrics["hf_ratio"] - 1.0).abs() < 1e-9 && (sh.metrics["band_ratio"] - 1.0).abs() < 1e-9);
-    run(&["sharpness", "--frames", &s.path("flicker"), "--reference-frames", &s.path("frames"), "--json", &s.path("shs.json")]);
+    run(&[
+        "sharpness",
+        "--frames",
+        &s.path("flicker"),
+        "--reference-frames",
+        &s.path("frames"),
+        "--json",
+        &s.path("shs.json"),
+    ]);
     let shs = report(&s.path("shs.json"));
     assert_eq!(shs.samples["hf_ratio"].values.len(), n);
     assert_eq!(shs.samples["band_ratio"].values.len(), n);

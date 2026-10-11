@@ -156,7 +156,11 @@ pub struct CpuDis {
 
 impl std::fmt::Debug for CpuDis {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CpuDis").field("params", &self.params).field("plan", &self.plan).field("isa", &self.isa).finish_non_exhaustive()
+        f.debug_struct("CpuDis")
+            .field("params", &self.params)
+            .field("plan", &self.plan)
+            .field("isa", &self.isa)
+            .finish_non_exhaustive()
     }
 }
 
@@ -225,11 +229,13 @@ impl CpuDis {
             let level = &mut fine[l];
             let (i0, i1) = if l == 0 { (frame0.data(), frame1.data()) } else { (&level.i0[..], &level.i1[..]) };
             // The next coarser level has been computed in this call if it is in the plan.
-            let coarser = coarse.first().filter(|_| l < plan.coarsest).map(|c| search::Coarse { flow: &c.flow, w: c.w, h: c.h });
+            let coarser =
+                coarse.first().filter(|_| l < plan.coarsest).map(|c| search::Coarse { flow: &c.flow, w: c.w, h: c.h });
             level.flow.resize(level.w * level.h, [0.0; 2]);
             if plan.is_searched(l) {
                 let (pw, ph) = plan.patch_grid(l, p.patch_stride);
-                let patches = search::search_level(&mut self.search, i0, i1, level.w, level.h, p, pw, ph, coarser, self.isa);
+                let patches =
+                    search::search_level(&mut self.search, i0, i1, level.w, level.h, p, pw, ph, coarser, self.isa);
                 search::densify(i0, i1, level.w, level.h, p.patch_stride, pw, ph, patches, &mut level.flow, self.isa);
             } else {
                 let c = coarser.expect("levels below the finest searched one have a coarser level");
@@ -348,11 +354,19 @@ mod tests {
     use crate::params::Preset;
 
     fn texture(x: f32, y: f32) -> f32 {
-        128.0 + 40.0 * (0.21 * x + 0.07 * y).sin() + 30.0 * (-0.05 * x + 0.17 * y + 1.1).sin() + 20.0 * (0.33 * x + 0.29 * y).sin()
+        128.0
+            + 40.0 * (0.21 * x + 0.07 * y).sin()
+            + 30.0 * (-0.05 * x + 0.17 * y + 1.1).sin()
+            + 20.0 * (0.33 * x + 0.29 * y).sin()
     }
 
     fn shifted(w: usize, h: usize, shift: [f32; 2]) -> GrayImage {
-        GrayImage::from_vec(w, h, (0..w * h).map(|i| texture((i % w) as f32 - shift[0], (i / w) as f32 - shift[1])).collect()).unwrap()
+        GrayImage::from_vec(
+            w,
+            h,
+            (0..w * h).map(|i| texture((i % w) as f32 - shift[0], (i / w) as f32 - shift[1])).collect(),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -378,7 +392,8 @@ mod tests {
         for preset in Preset::ALL {
             let mut dis = CpuDis::new(w, h, &DisParams::preset(preset)).unwrap();
             let flow = dis.compute(&a, &b).unwrap();
-            let mask: Vec<bool> = (0..w * h).map(|i| (8..w - 8).contains(&(i % w)) && (8..h - 8).contains(&(i / w))).collect();
+            let mask: Vec<bool> =
+                (0..w * h).map(|i| (8..w - 8).contains(&(i % w)) && (8..h - 8).contains(&(i / w))).collect();
             let epe = flow.mean_epe(&FlowField::constant(w, h, truth), Some(&mask)).unwrap();
             assert!(epe < 0.15, "{preset}: EPE {epe}");
             // A second call reuses the buffers and gives the same result.
@@ -389,12 +404,17 @@ mod tests {
     #[test]
     fn upsampling_matches_resampling() {
         let (cw, ch) = (7, 5);
-        let flow: Vec<[f32; 2]> = (0..cw * ch).map(|i| [(i as f32 * 0.37).sin() * 3.0, (i as f32 * 0.61).cos()]).collect();
+        let flow: Vec<[f32; 2]> =
+            (0..cw * ch).map(|i| [(i as f32 * 0.37).sin() * 3.0, (i as f32 * 0.61).cos()]).collect();
         for (scale, w, h) in [(2.0, 14, 10), (2.0, 15, 11), (4.0, 29, 23), (1.0, 7, 5)] {
             let mut out = vec![[0.0; 2]; w * h];
             upsample(&flow, cw, ch, scale, &mut out, w, Isa::detect());
             for (i, o) in out.iter().enumerate() {
-                assert_eq!(*o, resample_flow(&flow, cw, ch, scale, (i % w) as f32, (i / w) as f32), "scale {scale}, pixel {i}");
+                assert_eq!(
+                    *o,
+                    resample_flow(&flow, cw, ch, scale, (i % w) as f32, (i / w) as f32),
+                    "scale {scale}, pixel {i}"
+                );
             }
         }
     }

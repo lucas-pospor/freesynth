@@ -213,7 +213,8 @@ impl PatchBounds {
             rank[c as usize] = i as u32;
         }
         let norms = order.iter().map(|&c| table[c as usize * planes + nc]).collect();
-        let sums = order.iter().flat_map(|&c| table[c as usize * planes..c as usize * planes + nc].iter().copied()).collect();
+        let sums =
+            order.iter().flat_map(|&c| table[c as usize * planes..c as usize * planes + nc].iter().copied()).collect();
         Some(Self { nc, cw, n: (p * p) as f32, weights, order, rank, norms, sums })
     }
 
@@ -287,16 +288,28 @@ fn prunable(lb: f32, best: f32) -> bool {
 /// The bounds need fixed channel weights. When the input has a target modulation (per-pixel
 /// guide weights), the search falls back to the plain scan, whose cost is pixels x source
 /// centres x patch area: hours for 20,000 pixels at a source size of about 1200x900.
-pub fn sampled_energy(evaluator: &PatchErrorEvaluator, pixels: &PixelSet, hint: Option<&Nnf>) -> Result<SampledEnergy, Error> {
+pub fn sampled_energy(
+    evaluator: &PatchErrorEvaluator,
+    pixels: &PixelSet,
+    hint: Option<&Nnf>,
+) -> Result<SampledEnergy, Error> {
     sampled_energy_with(evaluator, pixels, hint, true)
 }
 
 /// [`sampled_energy`], optionally without the lower-bound pruning. The result is the same either
 /// way; the unpruned scan is much slower and exists to verify that.
-pub fn sampled_energy_with(evaluator: &PatchErrorEvaluator, pixels: &PixelSet, hint: Option<&Nnf>, prune: bool) -> Result<SampledEnergy, Error> {
+pub fn sampled_energy_with(
+    evaluator: &PatchErrorEvaluator,
+    pixels: &PixelSet,
+    hint: Option<&Nnf>,
+    prune: bool,
+) -> Result<SampledEnergy, Error> {
     let (tw, th) = evaluator.target_size();
     if (pixels.width, pixels.height) != (tw, th) {
-        return invalid(format!("pixel set is for a {}x{} target, the target is {tw}x{th}", pixels.width, pixels.height));
+        return invalid(format!(
+            "pixel set is for a {}x{} target, the target is {tw}x{th}",
+            pixels.width, pixels.height
+        ));
     }
     if pixels.coords.iter().any(|&[x, y]| x as usize >= tw || y as usize >= th) {
         return invalid("pixel set has pixels outside the target");
@@ -478,7 +491,8 @@ mod tests {
         let nnf = Nnf::from_raw(32, 24, (0..32 * 24).map(|i| [(i % 32).clamp(2, 29), (i / 32).clamp(2, 21)]).collect());
         let e = nnf_energy(&ev, &nnf).unwrap();
         // Only the border pixels (mapped to the nearest valid centre) have energy.
-        let interior: f64 = (2..22).flat_map(|y| (2..30).map(move |x| (x, y))).map(|(x, y)| e.per_pixel[y * 32 + x] as f64).sum();
+        let interior: f64 =
+            (2..22).flat_map(|y| (2..30).map(move |x| (x, y))).map(|(x, y)| e.per_pixel[y * 32 + x] as f64).sum();
         assert_eq!(interior, 0.0);
 
         // The exhaustive search finds zero energy at every interior pixel too.
@@ -515,17 +529,28 @@ mod tests {
         // A deliberately bad hint: same result, and the hint is reported as suboptimal.
         let bad = Nnf::from_raw(26, 20, vec![[2, 2]; 26 * 20]);
         let h = sampled_energy(&ev, &px, Some(&bad)).unwrap();
-        assert_eq!(h.matches.iter().map(|m| m.source).collect::<Vec<_>>(), s.matches.iter().map(|m| m.source).collect::<Vec<_>>());
+        assert_eq!(
+            h.matches.iter().map(|m| m.source).collect::<Vec<_>>(),
+            s.matches.iter().map(|m| m.source).collect::<Vec<_>>()
+        );
         assert_eq!(h.total, s.total);
         assert!(h.hint_total.unwrap() > 1000.0);
         assert!(h.hint_suboptimal_frac.unwrap() > 0.9);
 
         // The exact field of the shift gives the same energies through nnf_energy.
-        let shift = Nnf::from_raw(26, 20, (0..26 * 20).map(|i| [(i % 26 + 7).clamp(2, 37), (i / 26 + 4).clamp(2, 27)]).collect());
+        let shift = Nnf::from_raw(
+            26,
+            20,
+            (0..26 * 20).map(|i| [(i % 26 + 7).clamp(2, 37), (i / 26 + 4).clamp(2, 27)]).collect(),
+        );
         let e = nnf_energy(&ev, &shift).unwrap();
         for m in &s.matches {
             let i = (m.target[1] * 26 + m.target[0]) as usize;
-            assert!(e.per_pixel[i] >= m.total * (1.0 - 1e-5), "exact search must not be beaten: {m:?} vs {}", e.per_pixel[i]);
+            assert!(
+                e.per_pixel[i] >= m.total * (1.0 - 1e-5),
+                "exact search must not be beaten: {m:?} vs {}",
+                e.per_pixel[i]
+            );
         }
     }
 
@@ -559,7 +584,8 @@ mod tests {
             let data = (0..w * h * 3)
                 .map(|i| {
                     let (x, y, c) = (((i / 3) % w) as f32, ((i / 3) / w) as f32, (i % 3) as f32);
-                    (128.0 + 90.0 * (x * f + c).sin() * (y * 0.8 * f).cos() + rng.below(9) as f32 - 4.0).clamp(0.0, 255.0) as u8
+                    (128.0 + 90.0 * (x * f + c).sin() * (y * 0.8 * f).cos() + rng.below(9) as f32 - 4.0)
+                        .clamp(0.0, 255.0) as u8
                 })
                 .collect();
             Image::from_raw(w, h, 3, data)

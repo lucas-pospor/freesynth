@@ -57,10 +57,9 @@ impl FromStr for Preset {
     type Err = Error;
 
     fn from_str(s: &str) -> Result<Self, Error> {
-        Preset::ALL
-            .into_iter()
-            .find(|p| p.name() == s)
-            .ok_or_else(|| Error::InvalidInput(format!("unknown preset '{s}' (expected compat, default, fast or high)")))
+        Preset::ALL.into_iter().find(|p| p.name() == s).ok_or_else(|| {
+            Error::InvalidInput(format!("unknown preset '{s}' (expected compat, default, fast or high)"))
+        })
     }
 }
 
@@ -240,7 +239,11 @@ impl Params {
             stop_threshold,
             use_stop_threshold: self.use_stop_threshold.unwrap_or(preset == Preset::Fast),
             vote_mode: self.vote_mode.unwrap_or(if tuned { VoteMode::Weighted } else { VoteMode::Plain }),
-            vote_rounding: self.vote_rounding.unwrap_or(if tuned { VoteRounding::Nearest } else { VoteRounding::Truncate }),
+            vote_rounding: self.vote_rounding.unwrap_or(if tuned {
+                VoteRounding::Nearest
+            } else {
+                VoteRounding::Truncate
+            }),
             search: self.search.unwrap_or(if tuned { SearchMode::Improved } else { SearchMode::Compat }),
         })
     }
@@ -332,7 +335,10 @@ mod tests {
         for preset in Preset::ALL {
             let p = Params::with_preset(preset);
             let exact = Params { bit_exact: true, ..p.clone() };
-            assert_eq!(exact.schedule_for_levels(2, Engine::Cpu).unwrap(), p.schedule_for_levels(2, Engine::Cpu).unwrap());
+            assert_eq!(
+                exact.schedule_for_levels(2, Engine::Cpu).unwrap(),
+                p.schedule_for_levels(2, Engine::Cpu).unwrap()
+            );
         }
     }
 
@@ -346,7 +352,11 @@ mod tests {
         assert!(Params { num_pyramid_levels: Some(0), ..Params::default() }.schedule(&inp, Engine::Cpu).is_err());
         assert!(Params { patch_size: 4, ..Params::default() }.schedule(&inp, Engine::Cpu).is_err());
         assert!(Params::default().schedule(&input(8, 8), Engine::Cpu).is_err());
-        let short = Params { search_vote_iters: Some(PerLevel::Levels(vec![1])), num_pyramid_levels: Some(2), ..Params::default() };
+        let short = Params {
+            search_vote_iters: Some(PerLevel::Levels(vec![1])),
+            num_pyramid_levels: Some(2),
+            ..Params::default()
+        };
         assert!(short.schedule(&inp, Engine::Cpu).is_err());
     }
 

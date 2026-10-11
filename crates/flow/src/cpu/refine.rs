@@ -186,14 +186,7 @@ fn derivatives16(rows: &[f32], x: usize) -> [F16; 6] {
     let (v3, v4, v5) = (at(1, 0), at(1, 1), at(1, 2));
     let (v6, v7, v8) = (at(2, 0), at(2, 1), at(2, 2));
     let (half, quarter, two) = (F16::splat(0.5), F16::splat(0.25), F16::splat(2.0));
-    [
-        v4,
-        half * (v5 - v3),
-        half * (v7 - v1),
-        quarter * ((v8 - v6) - (v2 - v0)),
-        v5 - two * v4 + v3,
-        v7 - two * v4 + v1,
-    ]
+    [v4, half * (v5 - v3), half * (v7 - v1), quarter * ((v8 - v6) - (v2 - v0)), v5 - two * v4 + v3, v7 - two * v4 + v1]
 }
 
 /// Fills the interleaved plane of frame 1's value and derivatives (`I`, `Ix`, `Iy`, `Ixy`,
@@ -269,7 +262,19 @@ fn terms_row(c: &Consts, rows: &[f32], d1: &[Derivs], flow: &[[f32; 2]], y: usiz
         let nb = inside * (one / ix.mul_add(ix, iy.mul_add(iy, zeta2)).sqrt());
         let ngx = inside * (one / ixx.mul_add(ixx, ixy.mul_add(ixy, zeta2)).sqrt());
         let ngy = inside * (one / ixy.mul_add(ixy, iyy.mul_add(iyy, zeta2)).sqrt());
-        let terms = [ix * nb, iy * nb, iz * nb, ixx * ngx, ixy * ngx, ixz * ngx, ixy * ngy, iyy * ngy, iyz * ngy, Lanes(fu), Lanes(fv)];
+        let terms = [
+            ix * nb,
+            iy * nb,
+            iz * nb,
+            ixx * ngx,
+            ixy * ngx,
+            ixz * ngx,
+            ixy * ngy,
+            iyy * ngy,
+            iyz * ngy,
+            Lanes(fu),
+            Lanes(fv),
+        ];
         // The chunk is one block column (block 0 is the ring); lane k is column x0 + k, so
         // even lanes go to parity 0 and odd lanes to parity 1.
         let block = &mut blocks[x0 / BLOCK_W + 1].0;
@@ -314,7 +319,8 @@ struct Tile {
     wd: PerPixel,
 }
 
-const _: () = assert!(std::mem::size_of::<Span>().is_multiple_of(64) && std::mem::size_of::<PerPixel>().is_multiple_of(64));
+const _: () =
+    assert!(std::mem::size_of::<Span>().is_multiple_of(64) && std::mem::size_of::<PerPixel>().is_multiple_of(64));
 
 impl Tile {
     fn boxed() -> Box<Self> {
@@ -349,7 +355,15 @@ thread_local! {
 
 /// One dispatch: relaxes every tile of the grid shifted by `shift`, reading `input` and writing
 /// `output`.
-fn sweep_tiles(c: &Consts, terms: &[Block], input: &[[f32; 2]], output: &mut [[f32; 2]], shift: (usize, usize), outer: usize, isa: Isa) {
+fn sweep_tiles(
+    c: &Consts,
+    terms: &[Block],
+    input: &[[f32; 2]],
+    output: &mut [[f32; 2]],
+    shift: (usize, usize),
+    outer: usize,
+    isa: Isa,
+) {
     let (w, h) = (c.w, c.h);
     let tiles_x = (w + shift.0).div_ceil(TILE_W);
     let per_group = tiles_x.div_ceil(GROUPS);
@@ -584,11 +598,17 @@ fn relax_colour(t: &mut Tile, colour: usize) {
         let (wl, wr, wu, wd) = (Lanes(t.wl[q][ty]), Lanes(t.wr[q][ty]), Lanes(t.wu[q][ty]), Lanes(t.wd[q][ty]));
         let su = wd.mul_add(
             F16::load(&t.u[q][cy + 1][OFF + 1..]),
-            wu.mul_add(F16::load(&t.u[q][cy - 1][OFF + 1..]), wr.mul_add(F16::load(&t.u[o][cy][OFF + q + 1..]), wl * F16::load(&t.u[o][cy][OFF + q..]))),
+            wu.mul_add(
+                F16::load(&t.u[q][cy - 1][OFF + 1..]),
+                wr.mul_add(F16::load(&t.u[o][cy][OFF + q + 1..]), wl * F16::load(&t.u[o][cy][OFF + q..])),
+            ),
         );
         let sv = wd.mul_add(
             F16::load(&t.v[q][cy + 1][OFF + 1..]),
-            wu.mul_add(F16::load(&t.v[q][cy - 1][OFF + 1..]), wr.mul_add(F16::load(&t.v[o][cy][OFF + q + 1..]), wl * F16::load(&t.v[o][cy][OFF + q..]))),
+            wu.mul_add(
+                F16::load(&t.v[q][cy - 1][OFF + 1..]),
+                wr.mul_add(F16::load(&t.v[o][cy][OFF + q + 1..]), wl * F16::load(&t.v[o][cy][OFF + q..])),
+            ),
         );
         let (m11, m12, m22) = (Lanes(t.m11[q][ty]), Lanes(t.m12[q][ty]), Lanes(t.m22[q][ty]));
         let nu = m11.mul_add(su, m12.mul_add(sv, Lanes(t.gu[q][ty])));

@@ -15,12 +15,7 @@ use crate::rng::GlibcRand;
 /// # Panics
 ///
 /// If the source is not larger than `2 * (patch_size / 2)` in both dimensions (no patch fits).
-pub fn nnf_init_random(
-    target: (usize, usize),
-    source: (usize, usize),
-    patch_size: usize,
-    rng: &mut GlibcRand,
-) -> Nnf {
+pub fn nnf_init_random(target: (usize, usize), source: (usize, usize), patch_size: usize, rng: &mut GlibcRand) -> Nnf {
     let r = (patch_size / 2) as i32;
     let range_x = source.0 as i32 - 2 * r;
     let range_y = source.1 as i32 - 2 * r;

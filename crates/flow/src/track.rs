@@ -40,10 +40,10 @@
 
 use rayon::prelude::*;
 
+use crate::FlowEstimator;
 use crate::error::{FlowError, invalid};
 use crate::flo::FlowField;
 use crate::image::GrayImage;
-use crate::FlowEstimator;
 
 /// Bilinear sample of a two-channel field at `(x, y)`, clamped to the field.
 #[inline]
@@ -95,7 +95,8 @@ impl PositionField {
     /// The positions `x + flow(x)`: the field of a frame whose flow to the keyframe is `flow`.
     pub fn from_displacement(flow: &FlowField) -> Self {
         let (w, h) = flow.size();
-        let data = flow.data().iter().enumerate().map(|(i, d)| [(i % w) as f32 + d[0], (i / w) as f32 + d[1]]).collect();
+        let data =
+            flow.data().iter().enumerate().map(|(i, d)| [(i % w) as f32 + d[0], (i / w) as f32 + d[1]]).collect();
         Self { width: w, height: h, data }
     }
 
@@ -332,13 +333,15 @@ impl ConfidenceMap {
     fn advect(&self, flow: &FlowField, keep: &[bool]) -> ConfidenceMap {
         let (w, h) = self.size();
         let mut data = vec![0.0; w * h];
-        data.par_chunks_mut(w).zip(flow.data().par_chunks(w)).zip(keep.par_chunks(w)).enumerate().for_each(|(y, ((out, f), k))| {
-            for (x, ((o, d), &keep)) in out.iter_mut().zip(f).zip(k).enumerate() {
-                if keep {
-                    *o = sample1(&self.data, w, h, x as f32 + d[0], y as f32 + d[1]);
+        data.par_chunks_mut(w).zip(flow.data().par_chunks(w)).zip(keep.par_chunks(w)).enumerate().for_each(
+            |(y, ((out, f), k))| {
+                for (x, ((o, d), &keep)) in out.iter_mut().zip(f).zip(k).enumerate() {
+                    if keep {
+                        *o = sample1(&self.data, w, h, x as f32 + d[0], y as f32 + d[1]);
+                    }
                 }
-            }
-        });
+            },
+        );
         ConfidenceMap { width: w, height: h, data }
     }
 }
@@ -474,7 +477,12 @@ impl Default for TrackParams {
 impl TrackParams {
     /// Anchors exactly every `stride` frames: no motion or failure rule.
     pub fn fixed_stride(stride: usize) -> Self {
-        Self { max_stride: stride, max_anchor_motion: f32::INFINITY, max_failure_jump: f32::INFINITY, ..Self::default() }
+        Self {
+            max_stride: stride,
+            max_anchor_motion: f32::INFINITY,
+            max_failure_jump: f32::INFINITY,
+            ..Self::default()
+        }
     }
 
     /// Checks the parameters for consistency.
@@ -482,7 +490,11 @@ impl TrackParams {
         if self.max_stride == 0 {
             return invalid("the anchor stride must be at least 1");
         }
-        if self.max_anchor_motion.is_nan() || self.max_anchor_motion <= 0.0 || self.max_failure_jump.is_nan() || self.max_failure_jump < 0.0 {
+        if self.max_anchor_motion.is_nan()
+            || self.max_anchor_motion <= 0.0
+            || self.max_failure_jump.is_nan()
+            || self.max_failure_jump < 0.0
+        {
             return invalid("the re-anchoring thresholds must be positive");
         }
         let (a1, a2) = (self.check.alpha1, self.check.alpha2);
@@ -563,7 +575,6 @@ pub struct Tracker<E> {
 }
 
 impl<E> Tracker<E> {
-
     pub fn params(&self) -> &TrackParams {
         &self.params
     }
@@ -603,8 +614,13 @@ impl<E: FlowEstimator> Tracker<E> {
     pub fn new(estimator: E, keyframe: GrayImage, params: TrackParams) -> Result<Self, FlowError> {
         params.validate()?;
         let (w, h) = keyframe.size();
-        let anchor =
-            State { index: 0, positions: PositionField::identity(w, h), confidence: ConfidenceMap::ones(w, h), image: keyframe, spacing: 1.0 };
+        let anchor = State {
+            index: 0,
+            positions: PositionField::identity(w, h),
+            confidence: ConfidenceMap::ones(w, h),
+            image: keyframe,
+            spacing: 1.0,
+        };
         Ok(Self { estimator, params, index: 0, anchor, previous: None })
     }
 
@@ -675,10 +691,14 @@ impl<E: FlowEstimator> Tracker<E> {
 /// Median flow length over a sample of every fourth pixel in each direction.
 fn median_length(flow: &FlowField) -> f32 {
     let (w, h) = flow.size();
-    let mut lengths: Vec<f32> = (0..h).step_by(4).flat_map(|y| (0..w).step_by(4).map(move |x| (x, y))).map(|(x, y)| {
-        let [u, v] = flow.get(x, y);
-        u.hypot(v)
-    }).collect();
+    let mut lengths: Vec<f32> = (0..h)
+        .step_by(4)
+        .flat_map(|y| (0..w).step_by(4).map(move |x| (x, y)))
+        .map(|(x, y)| {
+            let [u, v] = flow.get(x, y);
+            u.hypot(v)
+        })
+        .collect();
     if lengths.is_empty() {
         return 0.0;
     }
@@ -830,7 +850,12 @@ mod tests {
     #[test]
     fn confidence_is_cleared_where_inconsistent() {
         // A flow of 3 px to the right: pixels whose destination leaves the frame fail the check.
-        let mut t = Tracker::new(Shift { calls: 0 }, frame(0.0), TrackParams { erode_radius: 1, ..TrackParams::fixed_stride(10) }).unwrap();
+        let mut t = Tracker::new(
+            Shift { calls: 0 },
+            frame(0.0),
+            TrackParams { erode_radius: 1, ..TrackParams::fixed_stride(10) },
+        )
+        .unwrap();
         t.step(&frame(-3.0)).unwrap();
         let c = t.confidence();
         // x + 3 > 31 for x > 28; the eroded region reaches one pixel further.
@@ -843,9 +868,16 @@ mod tests {
 
     #[test]
     fn rejects_bad_parameters_and_frames() {
-        assert!(Tracker::new(Shift { calls: 0 }, frame(0.0), TrackParams { max_stride: 0, ..TrackParams::default() }).is_err());
+        assert!(
+            Tracker::new(Shift { calls: 0 }, frame(0.0), TrackParams { max_stride: 0, ..TrackParams::default() })
+                .is_err()
+        );
         assert!(TrackParams { max_anchor_motion: 0.0, ..TrackParams::default() }.validate().is_err());
-        assert!(TrackParams { check: ForwardBackward { alpha1: -1.0, alpha2: 0.5 }, ..TrackParams::default() }.validate().is_err());
+        assert!(
+            TrackParams { check: ForwardBackward { alpha1: -1.0, alpha2: 0.5 }, ..TrackParams::default() }
+                .validate()
+                .is_err()
+        );
         let mut t = Tracker::new(Shift { calls: 0 }, frame(0.0), TrackParams::default()).unwrap();
         assert!(t.step(&GrayImage::new(8, 8)).is_err());
     }

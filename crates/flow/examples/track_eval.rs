@@ -69,7 +69,14 @@ fn parse() -> Result<Options, String> {
         list: None,
         out: None,
     };
-    let mut scene = SceneParams { width: 480, height: 270, frames: 100, seed: 4, family: StyleFamily::Rigid, ..SceneParams::default() };
+    let mut scene = SceneParams {
+        width: 480,
+        height: 270,
+        frames: 100,
+        seed: 4,
+        family: StyleFamily::Rigid,
+        ..SceneParams::default()
+    };
     let mut use_scene = false;
     let mut fixed = false;
     let mut args = std::env::args().skip(1);
@@ -119,7 +126,12 @@ fn parse() -> Result<Options, String> {
     Ok(o)
 }
 
-fn estimator(cpu: bool, w: usize, h: usize, params: &DisParams) -> Result<Box<dyn FlowEstimator>, Box<dyn std::error::Error>> {
+fn estimator(
+    cpu: bool,
+    w: usize,
+    h: usize,
+    params: &DisParams,
+) -> Result<Box<dyn FlowEstimator>, Box<dyn std::error::Error>> {
     Ok(if cpu {
         Box::new(CpuDis::new(w, h, params)?)
     } else {
@@ -142,7 +154,13 @@ struct Score {
 /// Position errors and confidence statistics over the pixels that have a keyframe position
 /// (`layer` is `Some`: 0 for the background, more for objects); confident pixels without one
 /// are counted as `hidden` failures.
-fn report(t: usize, positions: &PositionField, confidence: &ConfidenceMap, truth: &PositionField, layer: &[Option<u8>]) -> Score {
+fn report(
+    t: usize,
+    positions: &PositionField,
+    confidence: &ConfidenceMap,
+    truth: &PositionField,
+    layer: &[Option<u8>],
+) -> Score {
     let mut confident_errors = Vec::new();
     let mut all_errors = Vec::new();
     let (mut bad, mut bad_flagged, mut flagged, mut flagged_bad, mut hidden) = (0usize, 0usize, 0usize, 0usize, 0usize);
@@ -210,7 +228,9 @@ fn summary(scores: &[(usize, Score)]) {
     let worst = |key: fn(&Score) -> f64, lowest: bool| {
         scores.iter().map(|(t, s)| (*t, key(s))).reduce(|a, b| if (b.1 < a.1) == lowest { b } else { a })
     };
-    if let (Some(b), Some(bh), Some(p)) = (worst(|s| s.bad3, false), worst(|s| s.bad3_hidden, false), worst(|s| s.precision, true)) {
+    if let (Some(b), Some(bh), Some(p)) =
+        (worst(|s| s.bad3, false), worst(|s| s.bad3_hidden, false), worst(|s| s.precision, true))
+    {
         println!(
             "over {} reported frames: max bad3 {:.3}% (frame {}), max bad3 with hidden {:.3}% (frame {}), min precision {:.1}% (frame {})",
             scores.len(),
@@ -293,11 +313,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         if at.contains(&t) {
             tracker.positions().displacement().save(out.join(format!("pos_{t:05}.flo")))?;
-            let conf: Vec<u16> = tracker.confidence().data().iter().map(|&c| (c.clamp(0.0, 1.0) * 65535.0).round() as u16).collect();
+            let conf: Vec<u16> =
+                tracker.confidence().data().iter().map(|&c| (c.clamp(0.0, 1.0) * 65535.0).round() as u16).collect();
             image::ImageBuffer::<image::Luma<u16>, _>::from_raw(w as u32, h as u32, conf)
                 .ok_or("confidence size")?
                 .save(out.join(format!("conf_{t:05}.png")))?;
-            println!("frame {t}: anchor {}, {:.1}% confident", info.anchor, 100.0 * tracker.confidence().fraction_confident(0.5));
+            println!(
+                "frame {t}: anchor {}, {:.1}% confident",
+                info.anchor,
+                100.0 * tracker.confidence().fraction_confident(0.5)
+            );
         }
     }
     Ok(())

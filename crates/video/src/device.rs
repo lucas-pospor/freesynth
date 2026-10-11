@@ -55,8 +55,12 @@ pub trait Synthesizer: Sync {
 /// Creates optical flow estimators. Implemented by [`ComputeDevice`].
 pub trait FlowProvider: Sync {
     /// A new estimator for `width` x `height` frames.
-    fn flow_estimator(&self, width: usize, height: usize, params: &DisParams)
-    -> Result<Box<dyn FlowEstimator + Send>, VideoError>;
+    fn flow_estimator(
+        &self,
+        width: usize,
+        height: usize,
+        params: &DisParams,
+    ) -> Result<Box<dyn FlowEstimator + Send>, VideoError>;
 }
 
 /// The two engines' handles on one shared wgpu device.
@@ -89,7 +93,9 @@ impl ComputeDevice {
         match backend {
             Backend::Cpu => Ok(Self::cpu()),
             Backend::Gpu => Self::gpu(),
-            Backend::Auto => Ok(Self::gpu().unwrap_or_else(|e| Self { fallback_reason: Some(e.to_string()), ..Self::cpu() })),
+            Backend::Auto => {
+                Ok(Self::gpu().unwrap_or_else(|e| Self { fallback_reason: Some(e.to_string()), ..Self::cpu() }))
+            }
         }
     }
 

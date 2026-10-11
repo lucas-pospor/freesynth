@@ -120,7 +120,13 @@ impl Plan {
         let n = keys.len();
         let mut chains = Vec::new();
         if keys[0] > first {
-            chains.push(Chain { keyframe: 0, direction: Direction::Backward, start: keys[0] - 1, end: first, output: ChainOutput::Direct });
+            chains.push(Chain {
+                keyframe: 0,
+                direction: Direction::Backward,
+                start: keys[0] - 1,
+                end: first,
+                output: ChainOutput::Direct,
+            });
         }
         let intervals: Vec<Interval> = keys.windows(2).map(|w| Interval { start: w[0], end: w[1] }).collect();
         for (i, iv) in intervals.iter().enumerate() {

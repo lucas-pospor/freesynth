@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 
 use freesynth_core::io;
 use freesynth_video::{
-    Backend, CancelToken, ComputeDevice, FlowBackend, FrameSink, FrameSource, ImageSequence, ImageSequenceWriter, Keyframe, Progress,
-    RenderOptions, RenderStats, Renderer, Shot, VideoError, VideoParams,
+    Backend, CancelToken, ComputeDevice, FlowBackend, FrameSink, FrameSource, ImageSequence, ImageSequenceWriter,
+    Keyframe, Progress, RenderOptions, RenderStats, Renderer, Shot, VideoError, VideoParams,
 };
 
 use crate::error::Error;
@@ -158,11 +158,10 @@ impl Session {
                 Ok(Keyframe { frame: k.frame, style })
             })
             .collect::<Result<Vec<_>, Error>>()?;
-        let range = range.unwrap_or((
-            project.media.first.unwrap_or(frames.first()),
-            project.media.last.unwrap_or(frames.last()),
-        ));
-        let shot = Shot { frames: &frames, keyframes, mask: mask.as_ref().map(|m| m as &dyn FrameSource), range: Some(range) };
+        let range = range
+            .unwrap_or((project.media.first.unwrap_or(frames.first()), project.media.last.unwrap_or(frames.last())));
+        let shot =
+            Shot { frames: &frames, keyframes, mask: mask.as_ref().map(|m| m as &dyn FrameSource), range: Some(range) };
         let o = &self.options;
         let project_cache = project.base_dir().join(".freesynth-cache");
         let spill_dir = o.cache_dir.clone().unwrap_or_else(|| project_cache.clone()).join("spill");

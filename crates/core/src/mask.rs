@@ -17,12 +17,10 @@ pub(crate) fn eval_mask(a: &Image, b: &Image, stop_threshold: u32, mask: &mut [u
     let nc = a.channels();
     assert_eq!(a.size(), b.size());
     assert_eq!(mask.len(), a.width() * a.height());
-    mask.par_iter_mut()
-        .zip(a.data().par_chunks(nc).zip(b.data().par_chunks(nc)))
-        .for_each(|(m, (pa, pb))| {
-            let max_diff = pa.iter().zip(pb).map(|(&x, &y)| x.abs_diff(y) as u32).max().unwrap_or(0);
-            *m = if max_diff < stop_threshold { 0 } else { ACTIVE };
-        });
+    mask.par_iter_mut().zip(a.data().par_chunks(nc).zip(b.data().par_chunks(nc))).for_each(|(m, (pa, pb))| {
+        let max_diff = pa.iter().zip(pb).map(|(&x, &y)| x.abs_diff(y) as u32).max().unwrap_or(0);
+        *m = if max_diff < stop_threshold { 0 } else { ACTIVE };
+    });
 }
 
 /// `krnlDilateMask`: a pixel becomes active if any pixel within the patch window (clamped at the

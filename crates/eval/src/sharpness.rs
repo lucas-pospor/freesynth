@@ -127,7 +127,8 @@ pub fn gaussian_blur(plane: &[f32], w: usize, h: usize, sigma: f64) -> Vec<f32> 
     let mut out = vec![0.0f32; w * h];
     out.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
         for (x, o) in row.iter_mut().enumerate() {
-            *o = k.iter().enumerate().map(|(j, &kv)| kv * tmp[reflect101(y as isize + j as isize - r, h) * w + x]).sum();
+            *o =
+                k.iter().enumerate().map(|(j, &kv)| kv * tmp[reflect101(y as isize + j as isize - r, h) * w + x]).sum();
         }
     });
     out
@@ -170,7 +171,13 @@ mod tests {
     use super::*;
 
     fn checker(w: usize, h: usize, cell: usize) -> RgbImage {
-        RgbImage::from_raw(w, h, (0..w * h).map(|i| if ((i % w) / cell + (i / w) / cell).is_multiple_of(2) { [1.0; 3] } else { [0.0; 3] }).collect())
+        RgbImage::from_raw(
+            w,
+            h,
+            (0..w * h)
+                .map(|i| if ((i % w) / cell + (i / w) / cell).is_multiple_of(2) { [1.0; 3] } else { [0.0; 3] })
+                .collect(),
+        )
     }
 
     fn blur_rgb(img: &RgbImage, sigma: f64) -> RgbImage {
@@ -231,7 +238,11 @@ mod tests {
             .collect();
         let clean = RgbImage::from_raw(w, h, base.clone());
         let mut rng = crate::rng::SplitMix64::new(4);
-        let noisy = RgbImage::from_raw(w, h, base.iter().map(|p| [(p[0] + 0.06 * rng.normal() as f32).clamp(0.0, 1.0); 3]).collect());
+        let noisy = RgbImage::from_raw(
+            w,
+            h,
+            base.iter().map(|p| [(p[0] + 0.06 * rng.normal() as f32).clamp(0.0, 1.0); 3]).collect(),
+        );
         let r = Sharpness::of(&noisy, DEFAULT_SIGMA).ratio(&Sharpness::of(&clean, DEFAULT_SIGMA)).unwrap();
         assert!(r.hf > 1.0 && r.band > 1.0, "{r:?}");
         assert!(r.band - 1.0 < 0.5 * (r.hf - 1.0), "{r:?}");

@@ -16,8 +16,8 @@ use freesynth_eval::energy::{nnf_energy, sample_pixels, sampled_energy_with};
 use freesynth_eval::frame::RgbImage;
 use freesynth_eval::occupancy::{Occupancy, occupancy};
 use freesynth_eval::report::{format_value, markdown_table};
-use freesynth_eval::stats::metric_stats;
 use freesynth_eval::sharpness::{DEFAULT_SIGMA, MAX_SIGMA, Sharpness, valid_sigma};
+use freesynth_eval::stats::metric_stats;
 use freesynth_eval::temporal::{FlowDirs, FrameDir, FrameSource, FrameValue, TemporalOptions, temporal_metrics};
 use freesynth_eval::{PixelSet, Report};
 
@@ -137,7 +137,10 @@ impl Common {
                 if n == 0 {
                     return Err("--threads must be at least 1".into());
                 }
-                rayon::ThreadPoolBuilder::new().num_threads(n).build_global().map_err(|e| format!("cannot set up threads: {e}"))?;
+                rayon::ThreadPoolBuilder::new()
+                    .num_threads(n)
+                    .build_global()
+                    .map_err(|e| format!("cannot set up threads: {e}"))?;
             }
             _ => return Ok(false),
         }
@@ -252,11 +255,8 @@ impl Problem {
         if let Some(w) = self.style_weight {
             report.input("style_weight", w);
         }
-        let guides: Vec<serde_json::Value> = self
-            .guides
-            .iter()
-            .map(|(s, t, w)| serde_json::json!({ "source": s, "target": t, "weight": w }))
-            .collect();
+        let guides: Vec<serde_json::Value> =
+            self.guides.iter().map(|(s, t, w)| serde_json::json!({ "source": s, "target": t, "weight": w })).collect();
         report.input("guides", guides);
         report.input("patch_size", self.patch());
     }
@@ -386,7 +386,11 @@ fn cmd_sampled(mut args: Args) -> Res<()> {
     let totals: Vec<f64> = s.matches.iter().map(|m| m.total as f64).collect();
     let styles: Vec<f64> = s.matches.iter().map(|m| m.style as f64).collect();
     let guides: Vec<f64> = totals.iter().zip(&styles).map(|(t, s)| t - s).collect();
-    report.samples("total", key.as_str(), totals).samples("style", key.as_str(), styles).samples("guide", key.as_str(), guides);
+    report.samples("total", key.as_str(), totals).samples("style", key.as_str(), styles).samples(
+        "guide",
+        key.as_str(),
+        guides,
+    );
     report.pixels = Some(pixels);
     common.emit(report)
 }
@@ -464,7 +468,9 @@ fn cmd_sharpness(mut args: Args) -> Res<()> {
     let load = |p: &str| RgbImage::load(p).map_err(|e| e.to_string());
     let measure = |img: &RgbImage| Sharpness::of(img, sigma);
     // Ratios are undefined against a reference without any detail.
-    let ratio = |out: &Sharpness, refs: &Sharpness, what: &str| out.ratio(refs).ok_or(format!("the reference {what} is flat (no detail to compare with)"));
+    let ratio = |out: &Sharpness, refs: &Sharpness, what: &str| {
+        out.ratio(refs).ok_or(format!("the reference {what} is flat (no detail to compare with)"))
+    };
     let mut report = Report::new("sharpness");
     report.input("sigma", sigma);
     match (&image, &frames) {
@@ -523,10 +529,11 @@ fn cmd_sharpness(mut args: Args) -> Res<()> {
                 .metric("gradient_ratio", mean(&grad))
                 .metric("gradient_ratio_last", *grad.last().expect("at least one frame"));
             let key = format!("frames/{first}-{last}");
-            report
-                .samples("band_ratio", key.as_str(), band)
-                .samples("hf_ratio", key.as_str(), hf)
-                .samples("gradient_ratio", key.as_str(), grad);
+            report.samples("band_ratio", key.as_str(), band).samples("hf_ratio", key.as_str(), hf).samples(
+                "gradient_ratio",
+                key.as_str(),
+                grad,
+            );
         }
         _ => return Err("give exactly one of --image and --frames".into()),
     }
@@ -544,7 +551,9 @@ fn frame_samples(values: &[FrameValue], key: &str) -> (Option<f64>, String, Vec<
 
 /// Whether `label` is usable as a sequence name and report file name.
 fn valid_label(label: &str) -> bool {
-    !label.is_empty() && !label.chars().all(|c| c == '.') && label.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    !label.is_empty()
+        && !label.chars().all(|c| c == '.')
+        && label.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
 /// Parses a `--frames [NAME=]DIR` value into (label, directory).
@@ -567,7 +576,8 @@ fn sequence_arg(v: &str) -> Res<(String, String)> {
         Some(n) if n == "frames" => path.parent().and_then(name).unwrap_or(n),
         other => other.unwrap_or_default(),
     };
-    let label: String = base.chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') { c } else { '_' }).collect();
+    let label: String =
+        base.chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') { c } else { '_' }).collect();
     if !valid_label(&label) {
         return Err(format!("cannot name the sequence in '{v}'; name it with --frames NAME=DIR"));
     }
@@ -635,16 +645,29 @@ fn cmd_temporal(mut args: Args) -> Res<()> {
     for (gap, f, b) in &direct {
         flows = flows.with_direct(*gap, f, b).map_err(|e| e.to_string())?;
     }
-    let dirs: Vec<FrameDir> = sequences.iter().map(|(_, d)| FrameDir::open(d)).collect::<Result<_, _>>().map_err(|e| e.to_string())?;
+    let dirs: Vec<FrameDir> =
+        sequences.iter().map(|(_, d)| FrameDir::open(d)).collect::<Result<_, _>>().map_err(|e| e.to_string())?;
     // Measure the frames that every sequence has.
-    let found = || sequences.iter().zip(&dirs).map(|((l, _), d)| format!("{l}: {}-{}", d.range().0, d.range().1)).collect::<Vec<_>>().join(", ");
+    let found = || {
+        sequences
+            .iter()
+            .zip(&dirs)
+            .map(|((l, _), d)| format!("{l}: {}-{}", d.range().0, d.range().1))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
     let (lo, hi) = dirs.iter().map(FrameDir::range).fold((0, usize::MAX), |(lo, hi), (a, b)| (lo.max(a), hi.min(b)));
     if lo > hi {
         return Err(format!("the sequences have no frames in common (found {})", found()));
     }
     let range = (first.unwrap_or(lo), last.unwrap_or(hi));
     if range.0 < lo || range.1 > hi || range.0 > range.1 {
-        return Err(format!("frames {}-{} are not present in every sequence (common frames {lo}-{hi}; found {})", range.0, range.1, found()));
+        return Err(format!(
+            "frames {}-{} are not present in every sequence (common frames {lo}-{hi}; found {})",
+            range.0,
+            range.1,
+            found()
+        ));
     }
     let opts = TemporalOptions { first: range.0, last: range.1, gaps: gaps.clone() };
     let sources: Vec<&dyn FrameSource> = dirs.iter().map(|d| d as &dyn FrameSource).collect();
@@ -664,7 +687,8 @@ fn cmd_temporal(mut args: Args) -> Res<()> {
             .input("last", opts.last)
             .input("gaps", opts.gaps.clone());
         for (g, values) in &seq.warp {
-            let (mean, key, kept) = frame_samples(values, &format!("pairs/gap{g}/{}-{}/flow={fw}", opts.first, opts.last));
+            let (mean, key, kept) =
+                frame_samples(values, &format!("pairs/gap{g}/{}-{}/flow={fw}", opts.first, opts.last));
             if let Some(m) = mean {
                 report.metric(&format!("warp{g}"), m);
             }
@@ -673,7 +697,8 @@ fn cmd_temporal(mut args: Args) -> Res<()> {
         for (g, fr) in &result.mask_frac {
             report.metric(&format!("mask_frac{g}"), fr.iter().sum::<f64>() / fr.len() as f64);
         }
-        let (mean, key, kept) = frame_samples(&seq.second_diff, &format!("frames/{}-{}/flow={fw}", opts.first + 1, opts.last - 1));
+        let (mean, key, kept) =
+            frame_samples(&seq.second_diff, &format!("frames/{}-{}/flow={fw}", opts.first + 1, opts.last - 1));
         if let Some(m) = mean {
             report.metric("second_diff", m);
         }
@@ -761,7 +786,8 @@ fn cmd_compare(mut args: Args) -> Res<()> {
         b.push(positional.pop().expect("two"));
         a.push(positional.pop().expect("two"));
     }
-    let comparison = compare_reports(&load_reports(&a)?, &load_reports(&b)?, &metrics, level, &cfg).map_err(|e| e.to_string())?;
+    let comparison =
+        compare_reports(&load_reports(&a)?, &load_reports(&b)?, &metrics, level, &cfg).map_err(|e| e.to_string())?;
     match &common.json {
         Some(p) => write_text(p, &(comparison.to_json() + "\n"))?,
         None => println!("{}", comparison.to_json()),
@@ -828,7 +854,10 @@ fn cmd_stats(mut args: Args) -> Res<()> {
     let stats = metric_stats(&reports.iter().map(|(_, r)| r.clone()).collect::<Vec<_>>());
     let mut report = Report::new("stats");
     report.input("of", kind.as_str()).input("runs", files.clone());
-    let mut md = format!("Spread over {} {kind} reports.\n\n| metric | n | mean | sd | cv | min | max |\n|---|---:|---:|---:|---:|---:|---:|\n", files.len());
+    let mut md = format!(
+        "Spread over {} {kind} reports.\n\n| metric | n | mean | sd | cv | min | max |\n|---|---:|---:|---:|---:|---:|---:|\n",
+        files.len()
+    );
     for m in &stats {
         report
             .metric(&format!("{}_mean", m.metric), m.mean)

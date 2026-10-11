@@ -7,7 +7,9 @@ use freesynth_scenes::{Scene, SceneParams, StyleFamily};
 /// A smooth, non-repetitive texture moved by `shift`: `render(0)(x) = render(shift)(x + shift)`.
 fn render(w: usize, h: usize, shift: [f32; 2]) -> GrayImage {
     let texture = |x: f32, y: f32| {
-        128.0 + 30.0 * (0.21 * x + 0.07 * y + 0.3).sin() + 25.0 * (-0.05 * x + 0.17 * y + 1.1).sin()
+        128.0
+            + 30.0 * (0.21 * x + 0.07 * y + 0.3).sin()
+            + 25.0 * (-0.05 * x + 0.17 * y + 1.1).sin()
             + 20.0 * (0.11 * x - 0.13 * y + 2.0).sin()
             + 12.0 * (0.33 * x + 0.29 * y + 0.7).sin()
     };
@@ -21,7 +23,9 @@ fn recovers_constant_translation() {
     let shift = [2.75, -1.5];
     let (a, b) = (render(w, h, [0.0, 0.0]), render(w, h, shift));
     let margin = 12;
-    let mask: Vec<bool> = (0..w * h).map(|i| (margin..w - margin).contains(&(i % w)) && (margin..h - margin).contains(&(i / w))).collect();
+    let mask: Vec<bool> = (0..w * h)
+        .map(|i| (margin..w - margin).contains(&(i % w)) && (margin..h - margin).contains(&(i / w)))
+        .collect();
     for (preset, bound) in [(Preset::UltraFast, 0.15), (Preset::Fast, 0.1), (Preset::Medium, 0.02)] {
         let flow = CpuDis::new(w, h, &DisParams::preset(preset)).unwrap().compute(&a, &b).unwrap();
         let epe = flow.mean_epe(&FlowField::constant(w, h, shift), Some(&mask)).unwrap();
@@ -34,7 +38,14 @@ fn recovers_constant_translation() {
 /// panning background, with occlusion), for frame gaps of 1 and 5.
 #[test]
 fn exact_flow_scene() {
-    let params = SceneParams { width: 320, height: 180, frames: 6, seed: 3, family: StyleFamily::Rigid, ..SceneParams::default() };
+    let params = SceneParams {
+        width: 320,
+        height: 180,
+        frames: 6,
+        seed: 3,
+        family: StyleFamily::Rigid,
+        ..SceneParams::default()
+    };
     let scene = Scene::new(&params).unwrap();
     let (w, h) = (params.width, params.height);
     let gray = |f: &freesynth_scenes::Frame| GrayImage::from_rgb8(w, h, f.image.as_raw()).unwrap();

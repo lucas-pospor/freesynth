@@ -79,8 +79,10 @@ fn transpose_planes(s: &mut Scratch, i0: &[f32], i1: &[f32], w: usize, h: usize)
         plane.resize(w * h, 0.0);
     }
     let at0 = |x: isize, y: isize| i0[clamp_index(y, h) * w + clamp_index(x, w)];
-    (s.t0.par_chunks_mut(h), s.gx.par_chunks_mut(h), s.gy.par_chunks_mut(h), s.t1.par_chunks_mut(h)).into_par_iter().enumerate().for_each(
-        |(x, (t0, gx, gy, t1))| {
+    (s.t0.par_chunks_mut(h), s.gx.par_chunks_mut(h), s.gy.par_chunks_mut(h), s.t1.par_chunks_mut(h))
+        .into_par_iter()
+        .enumerate()
+        .for_each(|(x, (t0, gx, gy, t1))| {
             let xi = x as isize;
             for y in 0..h {
                 let yi = y as isize;
@@ -92,8 +94,7 @@ fn transpose_planes(s: &mut Scratch, i0: &[f32], i1: &[f32], w: usize, h: usize)
                 gy[y] = 0.125 * ((g + 2.0 * hh + i) - (a + 2.0 * b + c));
                 t1[y] = i1[y * w + x];
             }
-        },
-    );
+        });
 }
 
 /// Runs the first search pass and the propagation passes on a level with a `pw` x `ph` patch
@@ -165,7 +166,8 @@ pub(super) fn search_level<'s>(
 /// changed.
 #[inline(always)]
 fn search_row(ctx: &Ctx<'_>, pj: usize, row: &mut [[f32; 2]], cost_row: &mut [f32], changed_row: &mut [bool]) {
-    for (pi, ((out, cost), changed)) in row.iter_mut().zip(cost_row.iter_mut()).zip(changed_row.iter_mut()).enumerate() {
+    for (pi, ((out, cost), changed)) in row.iter_mut().zip(cost_row.iter_mut()).zip(changed_row.iter_mut()).enumerate()
+    {
         let p = pj * ctx.pw + pi;
         (*out, *cost) = match ctx.previous {
             Some(previous) => {

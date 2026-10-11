@@ -134,7 +134,15 @@ fn quick_tier() {
     let (frames, last) = (8usize, 7usize);
     let scene = s.join("rigid");
     let info = write_scene(
-        &SceneParams { width: 64, height: 48, frames, seed: 3, family: StyleFamily::Rigid, flow_gaps: vec![5], ..SceneParams::default() },
+        &SceneParams {
+            width: 64,
+            height: 48,
+            frames,
+            seed: 3,
+            family: StyleFamily::Rigid,
+            flow_gaps: vec![5],
+            ..SceneParams::default()
+        },
         "ci-rigid",
         &scene,
     )
@@ -164,7 +172,8 @@ fn quick_tier() {
     assert!((0.0..0.9).contains(&occ.unused_frac), "unused fraction {}", occ.unused_frac);
     // At the keyframe the problem is an identity: almost zero energy, almost every patch used.
     let input0 = problem(&scene, 0);
-    let e0 = nnf_energy(&PatchErrorEvaluator::new(&input0, &outputs[0].image, PATCH).unwrap(), &outputs[0].nnf).unwrap();
+    let e0 =
+        nnf_energy(&PatchErrorEvaluator::new(&input0, &outputs[0].image, PATCH).unwrap(), &outputs[0].nnf).unwrap();
     assert!(e0.total < 0.25 * e.total, "keyframe energy {} vs last frame {}", e0.total, e.total);
 
     // Sampled exact energy on one shared pixel set: below the engine's field, and a blurred
@@ -175,7 +184,8 @@ fn quick_tier() {
     assert!(exact <= nnf_px && exact > 0.3 * nnf_px, "exact {exact} vs engine field {nnf_px}");
     let blurred = sampled_report("blur", &input, &blur(&out.image), &pixels, None);
     let cfg = BootstrapConfig { resamples: 2000, ..BootstrapConfig::default() };
-    let c = compare_reports(&[("v".into(), ref_v.clone())], &[("blur".into(), blurred)], &["total".into()], None, &cfg).unwrap();
+    let c = compare_reports(&[("v".into(), ref_v.clone())], &[("blur".into(), blurred)], &["total".into()], None, &cfg)
+        .unwrap();
     assert_eq!(c.rows[0].level, Level::Samples);
     assert!(total_row(&c).diff_lo > 0.0, "blur must raise the exact energy: {:?}", total_row(&c));
 
@@ -188,7 +198,8 @@ fn quick_tier() {
     let truth = RgbImage::load(frame_file(&scene.join("truth"), last)).unwrap();
     let sharp_truth = Sharpness::of(&truth, DEFAULT_SIGMA);
     let sharp_v = Sharpness::of(&RgbImage::from_image(&out.image).unwrap(), DEFAULT_SIGMA).ratio(&sharp_truth).unwrap();
-    let sharp_b = Sharpness::of(&RgbImage::from_image(&blur(&out.image)).unwrap(), DEFAULT_SIGMA).ratio(&sharp_truth).unwrap();
+    let sharp_b =
+        Sharpness::of(&RgbImage::from_image(&blur(&out.image)).unwrap(), DEFAULT_SIGMA).ratio(&sharp_truth).unwrap();
     assert!((0.2..3.0).contains(&sharp_v.hf), "hf ratio {}", sharp_v.hf);
     assert!((0.2..3.0).contains(&sharp_v.band), "band ratio {}", sharp_v.band);
     assert!(sharp_b.hf < 0.8 * sharp_v.hf, "blur {} vs synthesis {}", sharp_b.hf, sharp_v.hf);
@@ -204,13 +215,24 @@ fn quick_tier() {
         std::fs::copy(scene.join("keys/00000.png"), frame_file(&static_dir, t)).unwrap();
         let mut img = io::load_rgba(frame_file(&scene.join("truth"), t)).unwrap();
         if t % 2 == 1 {
-            img.data_mut().iter_mut().enumerate().filter(|(i, _)| i % 4 != 3).for_each(|(_, v)| *v = (*v as f32 * 0.8) as u8);
+            img.data_mut()
+                .iter_mut()
+                .enumerate()
+                .filter(|(i, _)| i % 4 != 3)
+                .for_each(|(_, v)| *v = (*v as f32 * 0.8) as u8);
         }
         io::save_png(&img, frame_file(&flicker_dir, t)).unwrap();
     }
     let report_dir = s.join("temporal");
-    let seqs = [("input", scene.join("frames")), ("truth", scene.join("truth")), ("static", static_dir), ("flicker", flicker_dir), ("v", out_dir)];
-    let mut args: Vec<String> = vec!["temporal".into(), "--scene".into(), arg(&scene), "--out-dir".into(), arg(&report_dir)];
+    let seqs = [
+        ("input", scene.join("frames")),
+        ("truth", scene.join("truth")),
+        ("static", static_dir),
+        ("flicker", flicker_dir),
+        ("v", out_dir),
+    ];
+    let mut args: Vec<String> =
+        vec!["temporal".into(), "--scene".into(), arg(&scene), "--out-dir".into(), arg(&report_dir)];
     for (name, dir) in &seqs {
         args.extend(["--frames".into(), format!("{name}={}", arg(dir))]);
     }
@@ -227,7 +249,12 @@ fn quick_tier() {
     assert!((0.6..=1.0).contains(&m(&input_t, "mask_frac1")), "{:?}", input_t.metrics);
     assert!((0.4..=1.0).contains(&m(&input_t, "mask_frac5")), "{:?}", input_t.metrics);
     // Rigid ground truth moves with the flow; a repeated key does not (clearest over 5 frames).
-    assert!(m(&truth_t, "warp5") < 0.25 * m(&static_t, "warp5"), "truth {:?} static {:?}", truth_t.metrics, static_t.metrics);
+    assert!(
+        m(&truth_t, "warp5") < 0.25 * m(&static_t, "warp5"),
+        "truth {:?} static {:?}",
+        truth_t.metrics,
+        static_t.metrics
+    );
     assert!(m(&flicker_t, "warp1") > 3.0 * m(&truth_t, "warp1"));
     assert!(m(&flicker_t, "second_diff") > 3.0 * m(&truth_t, "second_diff"));
     assert!(m(&flicker_t, "global_flicker") > m(&truth_t, "global_flicker") + 5.0);
@@ -268,7 +295,9 @@ fn quick_tier() {
         sharp_v.band,
         sharp_b.band
     );
-    for (name, r) in [("input", &input_t), ("truth", &truth_t), ("static", &static_t), ("flicker", &flicker_t), ("v", &v_t)] {
+    for (name, r) in
+        [("input", &input_t), ("truth", &truth_t), ("static", &static_t), ("flicker", &flicker_t), ("v", &v_t)]
+    {
         eprintln!("  {name}: {:?}", r.metrics);
     }
 }

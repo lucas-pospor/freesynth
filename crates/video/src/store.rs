@@ -251,7 +251,9 @@ impl<K: SpillKey> SpillStore<K> {
     fn forget(&self, g: &mut Inner<K>, key: &K) {
         if let Some(r) = g.resident.remove(key) {
             g.used -= image_bytes(&r.image);
-            if r.on_disk && let Some(path) = self.path_for(key) {
+            if r.on_disk
+                && let Some(path) = self.path_for(key)
+            {
                 let _ = fs::remove_file(path);
             }
         }
@@ -336,7 +338,9 @@ impl<K: SpillKey> Drop for SpillStore<K> {
         let g = self.inner.get_mut().unwrap_or_else(|e| e.into_inner());
         let mut paths: Vec<PathBuf> = g.disk.drain().map(|(_, p)| p).collect();
         for (k, r) in g.resident.drain() {
-            if r.on_disk && let Some(p) = self.dir.as_ref().map(|d| d.join(format!("{}.raw", k.file_stem()))) {
+            if r.on_disk
+                && let Some(p) = self.dir.as_ref().map(|d| d.join(format!("{}.raw", k.file_stem())))
+            {
                 paths.push(p);
             }
         }

@@ -46,9 +46,10 @@ pub fn decode_rgba(bytes: &[u8], fallback: Option<ImageFormat>) -> Result<Image,
 pub fn dynamic_to_rgba(img: DynamicImage) -> Image {
     let (w, h) = (img.width() as usize, img.height() as usize);
     let data = match img {
-        DynamicImage::ImageLuma16(_) | DynamicImage::ImageLumaA16(_) | DynamicImage::ImageRgb16(_) | DynamicImage::ImageRgba16(_) => {
-            img.to_rgba16().into_raw().into_iter().map(|v| (v >> 8) as u8).collect()
-        }
+        DynamicImage::ImageLuma16(_)
+        | DynamicImage::ImageLumaA16(_)
+        | DynamicImage::ImageRgb16(_)
+        | DynamicImage::ImageRgba16(_) => img.to_rgba16().into_raw().into_iter().map(|v| (v >> 8) as u8).collect(),
         _ => img.to_rgba8().into_raw(),
     };
     Image::from_raw(w, h, 4, data)
@@ -292,7 +293,6 @@ mod tests {
             .unwrap_or_else(|| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target"));
         target.join("tmp").join(format!("{name}-{}", std::process::id()))
     }
-
 
     fn rgba(px: &[[u8; 4]]) -> Image {
         Image::from_raw(px.len(), 1, 4, px.iter().flatten().copied().collect())

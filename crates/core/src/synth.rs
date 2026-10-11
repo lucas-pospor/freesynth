@@ -304,9 +304,10 @@ impl SynthesisInput {
             return invalid("source and target guides differ in channel count");
         }
         if let Some(m) = &self.target_modulation
-            && (m.size() != self.target_guide.size() || m.channels() != ng) {
-                return invalid("target modulation must have the target guide's size and channels");
-            }
+            && (m.size() != self.target_guide.size() || m.channels() != ng)
+        {
+            return invalid("target modulation must have the target guide's size and channels");
+        }
         if self.style_weights.len() != ns || self.guide_weights.len() != ng {
             return invalid("need one weight per style channel and one per guide channel");
         }
@@ -488,10 +489,11 @@ fn synthesize_here(input: &SynthesisInput, params: &Params) -> Result<SynthesisO
             lv.set_target_style(&style);
 
             if let Some(m) = mask.as_mut()
-                && vote_iter + 1 < num_sv {
-                    eval_mask(&style, &style2, sched.stop_threshold[level], m);
-                    *m = dilate_mask(m, tw, th, patch_size);
-                }
+                && vote_iter + 1 < num_sv
+            {
+                eval_mask(&style, &style2, sched.stop_threshold[level], m);
+                *m = dilate_mask(m, tw, th, patch_size);
+            }
         }
 
         if level == num_levels - 1 {
@@ -536,7 +538,8 @@ mod tests {
     }
 
     fn psnr(a: &Image, b: &Image) -> f64 {
-        let mse = a.data().iter().zip(b.data()).map(|(&x, &y)| (x as f64 - y as f64).powi(2)).sum::<f64>() / a.data().len() as f64;
+        let mse = a.data().iter().zip(b.data()).map(|(&x, &y)| (x as f64 - y as f64).powi(2)).sum::<f64>()
+            / a.data().len() as f64;
         if mse == 0.0 { f64::INFINITY } else { 10.0 * (255.0f64 * 255.0 / mse).log10() }
     }
 
@@ -597,7 +600,13 @@ mod tests {
     fn returned_errors_are_the_final_patch_errors() {
         let input = shifted_input();
         for extra_pass_3x3 in [false, true] {
-            let params = Params { return_errors: true, extra_pass_3x3, omega_sync: OmegaSync::PerTile, num_threads: Some(2), ..Params::default() };
+            let params = Params {
+                return_errors: true,
+                extra_pass_3x3,
+                omega_sync: OmegaSync::PerTile,
+                num_threads: Some(2),
+                ..Params::default()
+            };
             let out = synthesize(&input, &params).unwrap();
             let e = crate::nnf_patch_errors(&input, &params, &out.image, &out.nnf).unwrap();
             let errors = out.errors.as_deref().expect("errors requested");
@@ -646,12 +655,16 @@ mod tests {
         let colour = rgba(&|i| [i as u8, 9, 1, 255]); // 3 channels
         let gray = rgba(&|i| [i as u8 * 9, i as u8 * 9, i as u8 * 9, 255]); // 1 channel
         let map = Image::from_raw(w, 1, 1, vec![0, 100, 255]);
-        let plain = SynthesisInput::from_rgba_layers(&style, None, &[GuideLayer::new(colour.clone(), colour.clone())]).unwrap();
+        let plain =
+            SynthesisInput::from_rgba_layers(&style, None, &[GuideLayer::new(colour.clone(), colour.clone())]).unwrap();
         assert!(plain.target_modulation.is_none());
         let input = SynthesisInput::from_rgba_layers(
             &style,
             None,
-            &[GuideLayer::new(colour.clone(), colour.clone()), GuideLayer::new(gray.clone(), gray.clone()).with_modulation(map.clone())],
+            &[
+                GuideLayer::new(colour.clone(), colour.clone()),
+                GuideLayer::new(gray.clone(), gray.clone()).with_modulation(map.clone()),
+            ],
         )
         .unwrap();
         let m = input.target_modulation.as_ref().unwrap();
@@ -733,7 +746,12 @@ mod tests {
         let img = test_image(60, 44);
         let mut input = identity_input(&img);
         input.target_guide = resample(&test_image(30, 22), 60, 44);
-        let base = Params { omega_sync: OmegaSync::PerTile, num_bands: Some(5), use_stop_threshold: Some(true), ..Params::default() };
+        let base = Params {
+            omega_sync: OmegaSync::PerTile,
+            num_bands: Some(5),
+            use_stop_threshold: Some(true),
+            ..Params::default()
+        };
         let a = synthesize(&input, &Params { num_threads: Some(2), ..base.clone() }).unwrap();
         let b = synthesize(&input, &Params { num_threads: Some(3), ..base.clone() }).unwrap();
         assert_eq!(a.nnf, b.nnf);

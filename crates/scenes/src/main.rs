@@ -85,7 +85,8 @@ fn generate(args: &[String]) -> Result<(), String> {
             "family" => params.family = value.parse::<StyleFamily>()?,
             "seed" => params.seed = parse(flag, value)?,
             "size" => {
-                let (w, h) = value.split_once(['x', 'X']).ok_or_else(|| format!("--size expects WxH, got '{value}'"))?;
+                let (w, h) =
+                    value.split_once(['x', 'X']).ok_or_else(|| format!("--size expects WxH, got '{value}'"))?;
                 params.width = parse(flag, w)?;
                 params.height = parse(flag, h)?;
             }
@@ -232,7 +233,11 @@ fn check(args: &[String]) -> Result<(), String> {
             }
             let n = pairs as f64;
             let truth = if info.ground_truth { format!(", truth MAE {:.3}", truth_err / n) } else { String::new() };
-            let masks = if info.occlusion_masks { format!("occluded {:.1}%", 100.0 * occluded / n) } else { "no occlusion masks, all pixels".to_owned() };
+            let masks = if info.occlusion_masks {
+                format!("occluded {:.1}%", 100.0 * occluded / n)
+            } else {
+                "no occlusion masks, all pixels".to_owned()
+            };
             println!("  gap {gap} {direction:?}: {pairs} pairs, {masks}, frame MAE {:.3}{truth}", frame_err / n);
         }
     }

@@ -309,10 +309,8 @@ fn patchmatch_k<const K: u8>(
             })
             .collect();
         let row = |y: usize| nnf.data()[y * tw..(y + 1) * tw].to_vec();
-        let snapshots: Vec<_> = bounds
-            .iter()
-            .map(|&(y0, y1)| ((y0 > 0).then(|| row(y0 - 1)), (y1 < th).then(|| row(y1))))
-            .collect();
+        let snapshots: Vec<_> =
+            bounds.iter().map(|&(y0, y1)| ((y0 > 0).then(|| row(y0 - 1)), (y1 < th).then(|| row(y1)))).collect();
         let mut bands = Vec::with_capacity(num_tiles);
         let mut rest_n = nnf.data_mut();
         let mut rest_e = &mut errors[..];
@@ -770,7 +768,13 @@ mod tests {
         let mut nnf = nnf_init_random((w, h), (w, h), 5, &mut rng);
         let mut errors = Vec::new();
         let mut ws = OmegaWorkspace::default();
-        let cfg = PatchMatchConfig { lambda: 10.0, num_iters: 3, num_bands: 4, sync: OmegaSync::PerTile, kernel: Kernel::Fast };
+        let cfg = PatchMatchConfig {
+            lambda: 10.0,
+            num_iters: 3,
+            num_bands: 4,
+            sync: OmegaSync::PerTile,
+            kernel: Kernel::Fast,
+        };
         // Two calls: the second reuses the maps the first left behind.
         for _ in 0..2 {
             patchmatch(&space, &mut nnf, &mut errors, &cfg, &mut rng, None, &mut ws);

@@ -27,12 +27,25 @@ fn score(positions: &PositionField, confident: &[bool], truth: &PositionField, v
             flagged_bad += usize::from(e > 3.0);
         }
     }
-    (conf as f64 / n as f64, conf_err / conf as f64, conf_bad as f64 / conf as f64, flagged_bad as f64 / bad.max(1) as f64)
+    (
+        conf as f64 / n as f64,
+        conf_err / conf as f64,
+        conf_bad as f64 / conf as f64,
+        flagged_bad as f64 / bad.max(1) as f64,
+    )
 }
 
 #[test]
 fn confidence_marks_wrong_positions() {
-    let params = SceneParams { width: 320, height: 180, frames: 25, seed: 4, family: StyleFamily::Rigid, keyframes: vec![0], ..SceneParams::default() };
+    let params = SceneParams {
+        width: 320,
+        height: 180,
+        frames: 25,
+        seed: 4,
+        family: StyleFamily::Rigid,
+        keyframes: vec![0],
+        ..SceneParams::default()
+    };
     let scene = Scene::new(&params).unwrap();
     let (w, h) = (params.width, params.height);
     let gray = |f: &freesynth_scenes::Frame| GrayImage::from_rgb8(w, h, f.image.as_raw()).unwrap();
@@ -49,8 +62,14 @@ fn confidence_marks_wrong_positions() {
         let exact = scene.flow(t, 0, &frame.layers, &key.layers);
         let valid: Vec<bool> = exact.occlusion.as_raw().iter().map(|&v| v == 0).collect();
         let truth = PositionField::from_displacement(&exact.flow);
-        let (share, error, bad, recall) = score(tracker.positions(), &tracker.confidence().confident(0.5), &truth, &valid);
-        eprintln!("frame {t}: {:.1}% confident, error {error:.3} px, bad3 {:.2}%, bad pixels flagged {:.1}%", 100.0 * share, 100.0 * bad, 100.0 * recall);
+        let (share, error, bad, recall) =
+            score(tracker.positions(), &tracker.confidence().confident(0.5), &truth, &valid);
+        eprintln!(
+            "frame {t}: {:.1}% confident, error {error:.3} px, bad3 {:.2}%, bad pixels flagged {:.1}%",
+            100.0 * share,
+            100.0 * bad,
+            100.0 * recall
+        );
         assert!(share > 0.5, "frame {t}: only {share} confident");
         assert!(error < 0.6 && bad < 0.04, "frame {t}: confident error {error} px, bad3 {bad}");
         assert!(recall > 0.65, "frame {t}: only {recall} of the wrong positions flagged");

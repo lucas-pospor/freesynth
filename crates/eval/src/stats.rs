@@ -77,7 +77,10 @@ fn incomplete_beta(x: f64, a: f64, b: f64) -> f64 {
     let mut f = d;
     for m in 1..300 {
         let m = m as f64;
-        for num in [m * (b - m) * x / ((a + 2.0 * m - 1.0) * (a + 2.0 * m)), -(a + m) * (a + b + m) * x / ((a + 2.0 * m) * (a + 2.0 * m + 1.0))] {
+        for num in [
+            m * (b - m) * x / ((a + 2.0 * m - 1.0) * (a + 2.0 * m)),
+            -(a + m) * (a + b + m) * x / ((a + 2.0 * m) * (a + 2.0 * m + 1.0)),
+        ] {
             d = 1.0 + num * d;
             d = 1.0 / if d.abs() < TINY { TINY } else { d };
             c = 1.0 + num / c;
@@ -112,7 +115,11 @@ pub fn student_t_quantile(q: f64, df: f64) -> f64 {
     }
     for _ in 0..200 {
         let mid = 0.5 * (lo + hi);
-        if student_t_cdf(mid, df) < q { lo = mid } else { hi = mid }
+        if student_t_cdf(mid, df) < q {
+            lo = mid
+        } else {
+            hi = mid
+        }
         if hi - lo <= 1e-12 * hi {
             break;
         }
@@ -199,7 +206,13 @@ mod tests {
     #[test]
     fn student_t() {
         // Reference quantiles (R: qt).
-        for (q, df, want) in [(0.975, 1.0, 12.706_204_736), (0.975, 4.0, 2.776_445_105), (0.975, 14.0, 2.144_786_688), (0.95, 30.0, 1.697_260_887), (0.995, 9.0, 3.249_835_542)] {
+        for (q, df, want) in [
+            (0.975, 1.0, 12.706_204_736),
+            (0.975, 4.0, 2.776_445_105),
+            (0.975, 14.0, 2.144_786_688),
+            (0.95, 30.0, 1.697_260_887),
+            (0.995, 9.0, 3.249_835_542),
+        ] {
             let got = student_t_quantile(q, df);
             assert!((got - want).abs() < 1e-6 * want, "t({q}, {df}) = {got}, expected {want}");
             assert!((student_t_quantile(1.0 - q, df) + want).abs() < 1e-6 * want);

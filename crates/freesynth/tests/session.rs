@@ -4,7 +4,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use freesynth::{
-    Backend, CancelToken, Keyframe, MemoryFrames, MemorySink, Progress, Project, Session, SessionOptions, Shot, VideoParams,
+    Backend, CancelToken, Keyframe, MemoryFrames, MemorySink, Progress, Project, Session, SessionOptions, Shot,
+    VideoParams,
 };
 use freesynth_core::io;
 use freesynth_scenes::{SceneParams, write_scene};
@@ -56,7 +57,11 @@ fn renders_a_project_file() {
 fn renders_a_range_into_a_custom_sink() {
     let (dir, mut project) = project("range");
     let mut session = Session::new(Backend::Cpu).unwrap();
-    session.set_options(SessionOptions { parallel_chains: Some(1), cache_dir: Some(dir.join("cache")), ..SessionOptions::default() });
+    session.set_options(SessionOptions {
+        parallel_chains: Some(1),
+        cache_dir: Some(dir.join("cache")),
+        ..SessionOptions::default()
+    });
     let sink = MemorySink::new();
     let stats = session.render_to(&project, Some((1, 4)), &sink, None, &CancelToken::new());
     // The range must contain the keyframes.
@@ -103,7 +108,11 @@ fn one_session_renders_two_projects_of_one_folder_at_once() {
     other.output.frames = "out2".into();
     // Small budgets, so that both renders spill into the shared cache directory.
     let mut session = Session::new(Backend::Cpu).unwrap();
-    session.set_options(SessionOptions { frame_cache_bytes: 64 * 48 * 4, buffer_bytes: 64 * 48 * 3, ..SessionOptions::default() });
+    session.set_options(SessionOptions {
+        frame_cache_bytes: 64 * 48 * 4,
+        buffer_bytes: 64 * 48 * 3,
+        ..SessionOptions::default()
+    });
     let session = std::sync::Arc::new(session);
     std::thread::scope(|s| {
         for p in [&project, &other] {

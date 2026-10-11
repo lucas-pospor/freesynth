@@ -107,7 +107,8 @@ impl SequenceTemporal {
     /// Mean absolute change of the mean luma between consecutive frames, in 8-bit levels.
     pub fn global_flicker(&self) -> Option<f64> {
         (self.mean_luma.len() >= 2).then(|| {
-            self.mean_luma.windows(2).map(|w| (w[1] - w[0]).abs()).sum::<f64>() / (self.mean_luma.len() - 1) as f64 * 255.0
+            self.mean_luma.windows(2).map(|w| (w[1] - w[0]).abs()).sum::<f64>() / (self.mean_luma.len() - 1) as f64
+                * 255.0
         })
     }
 }
@@ -275,7 +276,15 @@ impl FrameCache<'_> {
         }
         let img = self.source.frame(t)?;
         match self.size {
-            Some(s) if s != img.size() => return invalid(format!("frame {t} is {}x{}, earlier frames are {}x{}", img.width(), img.height(), s.0, s.1)),
+            Some(s) if s != img.size() => {
+                return invalid(format!(
+                    "frame {t} is {}x{}, earlier frames are {}x{}",
+                    img.width(),
+                    img.height(),
+                    s.0,
+                    s.1
+                ));
+            }
             _ => self.size = Some(img.size()),
         }
         self.frames.push_back((t, img));
@@ -295,7 +304,11 @@ impl FrameCache<'_> {
 /// Measures every sequence in `sequences` over the frames and gaps in `opts`, with flows from
 /// `flows`. Frames and flows are read one pair at a time; at most `max gap + 1` frames per
 /// sequence are held in memory.
-pub fn temporal_metrics(sequences: &[&dyn FrameSource], flows: &dyn FlowSource, opts: &TemporalOptions) -> Result<TemporalResult, Error> {
+pub fn temporal_metrics(
+    sequences: &[&dyn FrameSource],
+    flows: &dyn FlowSource,
+    opts: &TemporalOptions,
+) -> Result<TemporalResult, Error> {
     if opts.last <= opts.first {
         return invalid("need at least two frames");
     }
@@ -304,7 +317,8 @@ pub fn temporal_metrics(sequences: &[&dyn FrameSource], flows: &dyn FlowSource, 
     }
     let gaps: BTreeSet<usize> = opts.gaps.iter().copied().collect();
     let max_gap = *gaps.last().expect("non-empty");
-    let mut caches: Vec<FrameCache> = sequences.iter().map(|&s| FrameCache { source: s, frames: VecDeque::new(), size: None }).collect();
+    let mut caches: Vec<FrameCache> =
+        sequences.iter().map(|&s| FrameCache { source: s, frames: VecDeque::new(), size: None }).collect();
     let mut results = vec![SequenceTemporal::default(); sequences.len()];
     let mut mask_frac: BTreeMap<usize, Vec<f64>> = BTreeMap::new();
     // The last `max_gap` forward flows with their masks, oldest first.
@@ -325,7 +339,13 @@ pub fn temporal_metrics(sequences: &[&dyn FrameSource], flows: &dyn FlowSource, 
             cache.load(t + 1)?;
             let (o0, o1) = (cache.get(t), cache.get(t + 1));
             if o0.size() != fw.size() {
-                return invalid(format!("frame {t} is {}x{}, the flow is {}x{}", o0.width(), o0.height(), fw.width(), fw.height()));
+                return invalid(format!(
+                    "frame {t} is {}x{}, the flow is {}x{}",
+                    o0.width(),
+                    o0.height(),
+                    fw.width(),
+                    fw.height()
+                ));
             }
             if t == opts.first {
                 res.mean_luma.push(o0.mean_luma());
@@ -340,7 +360,11 @@ pub fn temporal_metrics(sequences: &[&dyn FrameSource], flows: &dyn FlowSource, 
                 let pred = RgbImage::from_raw(
                     prev.width(),
                     prev.height(),
-                    prev.data().iter().zip(next.data()).map(|(p, q)| [0.5 * (p[0] + q[0]), 0.5 * (p[1] + q[1]), 0.5 * (p[2] + q[2])]).collect(),
+                    prev.data()
+                        .iter()
+                        .zip(next.data())
+                        .map(|(p, q)| [0.5 * (p[0] + q[0]), 0.5 * (p[1] + q[1]), 0.5 * (p[2] + q[2])])
+                        .collect(),
                 );
                 let mask: Vec<bool> = pm.iter().zip(&m_fw).map(|(a, b)| *a && *b).collect();
                 res.second_diff.push(FrameValue { t, value: masked_error(o0, &pred, &mask) });
@@ -385,14 +409,20 @@ pub fn temporal_metrics(sequences: &[&dyn FrameSource], flows: &dyn FlowSource, 
 
 /// Lists `NNNNN.<ext>` files (5 or more digits) in `dir` by index, for the given extensions.
 fn indexed_files(dir: &Path, extensions: &[&str]) -> Result<BTreeMap<usize, PathBuf>, Error> {
-    let entries = std::fs::read_dir(dir).map_err(|e| Error::Invalid(format!("cannot read directory '{}': {e}", dir.display())))?;
+    let entries = std::fs::read_dir(dir)
+        .map_err(|e| Error::Invalid(format!("cannot read directory '{}': {e}", dir.display())))?;
     let mut files = BTreeMap::new();
     for entry in entries {
         let path = entry?.path();
-        let (Some(stem), Some(ext)) = (path.file_stem().and_then(|s| s.to_str()), path.extension().and_then(|s| s.to_str())) else {
+        let (Some(stem), Some(ext)) =
+            (path.file_stem().and_then(|s| s.to_str()), path.extension().and_then(|s| s.to_str()))
+        else {
             continue;
         };
-        if stem.len() < 5 || !stem.bytes().all(|b| b.is_ascii_digit()) || !extensions.contains(&ext.to_ascii_lowercase().as_str()) {
+        if stem.len() < 5
+            || !stem.bytes().all(|b| b.is_ascii_digit())
+            || !extensions.contains(&ext.to_ascii_lowercase().as_str())
+        {
             continue;
         }
         let Ok(t) = stem.parse::<usize>() else { continue };
@@ -519,7 +549,10 @@ impl FlowSource for FlowDirs {
 
     fn direct(&self, t: usize, gap: usize) -> Result<Option<(FlowField, FlowField)>, Error> {
         match self.direct.get(&gap) {
-            Some(d) => d.get(t)?.map(Some).ok_or_else(|| Error::Invalid(format!("direct flow files for frames {t}-{} are missing", t + gap))),
+            Some(d) => d
+                .get(t)?
+                .map(Some)
+                .ok_or_else(|| Error::Invalid(format!("direct flow files for frames {t}-{} are missing", t + gap))),
             None => Ok(None),
         }
     }
@@ -562,7 +595,10 @@ mod tests {
 
     impl FlowSource for ConstFlow {
         fn pair(&self, _t: usize) -> Result<(FlowField, FlowField), Error> {
-            Ok((FlowField::constant(self.w, self.h, self.uv), FlowField::constant(self.w, self.h, [-self.uv[0], -self.uv[1]])))
+            Ok((
+                FlowField::constant(self.w, self.h, self.uv),
+                FlowField::constant(self.w, self.h, [-self.uv[0], -self.uv[1]]),
+            ))
         }
     }
 
@@ -644,7 +680,11 @@ mod tests {
         for t in 0..n {
             let img = moving(w, h, t, 1.0, 0.0);
             let bytes: Vec<u8> = img.data().iter().flat_map(|p| p.map(|v| (v * 255.0).round() as u8)).collect();
-            freesynth_core::io::save_png(&freesynth_core::Image::from_raw(w, h, 3, bytes), frames.join(format!("{t:05}.png"))).unwrap();
+            freesynth_core::io::save_png(
+                &freesynth_core::Image::from_raw(w, h, 3, bytes),
+                frames.join(format!("{t:05}.png")),
+            )
+            .unwrap();
         }
         // Backward flows indexed by the frame they start from.
         for t in 0..n - 1 {

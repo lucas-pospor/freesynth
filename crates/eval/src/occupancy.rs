@@ -44,7 +44,9 @@ pub fn occupancy(nnf: &Nnf, source_size: (usize, usize), patch_size: usize) -> R
         return invalid("empty field or source");
     }
     if nnf.data().iter().any(|&[x, y]| x < r || y < r || x >= sw as i32 - r || y >= sh as i32 - r) {
-        return invalid(format!("field points outside the valid source centres for patch size {patch_size} in a {sw}x{sh} source"));
+        return invalid(format!(
+            "field points outside the valid source centres for patch size {patch_size} in a {sw}x{sh} source"
+        ));
     }
     let mut counts = vec![0u32; sw * sh];
     let mut used = vec![false; sw * sh];
@@ -129,7 +131,11 @@ mod tests {
     fn identity_field_covers_the_source() {
         // A 1:1 field over the interior of the source with patch 3.
         let (w, h) = (8, 6);
-        let nnf = Nnf::from_raw(w - 2, h - 2, (0..(w - 2) * (h - 2)).map(|i| [(i % (w - 2)) as i32 + 1, (i / (w - 2)) as i32 + 1]).collect());
+        let nnf = Nnf::from_raw(
+            w - 2,
+            h - 2,
+            (0..(w - 2) * (h - 2)).map(|i| [(i % (w - 2)) as i32 + 1, (i / (w - 2)) as i32 + 1]).collect(),
+        );
         let o = occupancy(&nnf, (w, h), 3).unwrap();
         assert_eq!(o.unused_frac, 0.0);
         assert_eq!(o.unique_centres_frac, 1.0);

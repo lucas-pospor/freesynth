@@ -204,8 +204,10 @@ impl PipelineCache {
                 let mut entries = vec![uniform_entry(layout.params_size())];
                 entries.extend((1..=3).map(|b| storage_entry(b, true)));
                 entries.extend((4..=12).map(|b| storage_entry(b, false)));
-                let bind_group_layout =
-                    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("synth"), entries: &entries });
+                let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("synth"),
+                    entries: &entries,
+                });
                 let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                     label: Some("synth"),
                     bind_group_layouts: &[Some(&bind_group_layout)],
@@ -216,7 +218,13 @@ impl PipelineCache {
             .clone()
     }
 
-    fn kernels(&mut self, device: &wgpu::Device, synth: &SynthLayout, layout: Layout, patch_size: usize) -> Arc<Kernels> {
+    fn kernels(
+        &mut self,
+        device: &wgpu::Device,
+        synth: &SynthLayout,
+        layout: Layout,
+        patch_size: usize,
+    ) -> Arc<Kernels> {
         Arc::clone(
             self.kernels
                 .entry((layout, patch_size))
@@ -477,12 +485,32 @@ impl<'a> Submitter<'a> {
     }
 
     /// Records one dispatch of a synthesis kernel over a `size` grid of pixels.
-    fn dispatch(&mut self, pipeline: &wgpu::ComputePipeline, group: &wgpu::BindGroup, offset: u32, size: (usize, usize), cost: u64) {
-        self.dispatch_groups(pipeline, group, offset, ((size.0 as u32).div_ceil(WG), (size.1 as u32).div_ceil(WG)), cost);
+    fn dispatch(
+        &mut self,
+        pipeline: &wgpu::ComputePipeline,
+        group: &wgpu::BindGroup,
+        offset: u32,
+        size: (usize, usize),
+        cost: u64,
+    ) {
+        self.dispatch_groups(
+            pipeline,
+            group,
+            offset,
+            ((size.0 as u32).div_ceil(WG), (size.1 as u32).div_ceil(WG)),
+            cost,
+        );
     }
 
     /// Records one dispatch of `groups` workgroups.
-    fn dispatch_groups(&mut self, pipeline: &wgpu::ComputePipeline, group: &wgpu::BindGroup, offset: u32, groups: (u32, u32), cost: u64) {
+    fn dispatch_groups(
+        &mut self,
+        pipeline: &wgpu::ComputePipeline,
+        group: &wgpu::BindGroup,
+        offset: u32,
+        groups: (u32, u32),
+        cost: u64,
+    ) {
         let pass = self.pass_for(cost);
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, group, &[offset]);
@@ -507,7 +535,11 @@ fn timing_enabled() -> bool {
 
 /// Runs a synthesis, turning wgpu validation and out-of-memory errors into [`GpuError`]s.
 /// Also returns the number of command buffers submitted.
-pub(crate) fn synthesize(ctx: &GpuContext, input: &SynthesisInput, params: &Params) -> Result<(SynthesisOutput, usize), GpuError> {
+pub(crate) fn synthesize(
+    ctx: &GpuContext,
+    input: &SynthesisInput,
+    params: &Params,
+) -> Result<(SynthesisOutput, usize), GpuError> {
     let sched = params.schedule(input, Engine::Gpu).map_err(|e| GpuError::InvalidInput(e.to_string()))?;
     let oom = ctx.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
     let validation = ctx.device.push_error_scope(wgpu::ErrorFilter::Validation);
@@ -520,14 +552,20 @@ pub(crate) fn synthesize(ctx: &GpuContext, input: &SynthesisInput, params: &Para
     result
 }
 
-fn run(ctx: &GpuContext, input: &SynthesisInput, params: &Params, sched: &Schedule) -> Result<(SynthesisOutput, usize), GpuError> {
+fn run(
+    ctx: &GpuContext,
+    input: &SynthesisInput,
+    params: &Params,
+    sched: &Schedule,
+) -> Result<(SynthesisOutput, usize), GpuError> {
     let t_start = Instant::now();
     let (device, queue) = (&ctx.device, &ctx.queue);
     let limits = device.limits();
 
     let ns = input.source_style.channels();
     let ng = input.source_guide.channels();
-    let layout = Layout { style_w: ns.div_ceil(4), guide_w: ng.div_ceil(4), modulated: input.target_modulation.is_some() };
+    let layout =
+        Layout { style_w: ns.div_ceil(4), guide_w: ng.div_ceil(4), modulated: input.target_modulation.is_some() };
     let source_size = input.source_style.size();
     let target_size = input.target_guide.size();
     let num_levels = sched.num_levels;
@@ -556,7 +594,12 @@ fn run(ctx: &GpuContext, input: &SynthesisInput, params: &Params, sched: &Schedu
     // --- Buffers ------------------------------------------------------------------------------
     let usage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST;
     let storage = |label: &str, size: u64| {
-        device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size: size.max(4), usage, mapped_at_creation: false })
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
+            size: size.max(4),
+            usage,
+            mapped_at_creation: false,
+        })
     };
     let upload = |label: &str, words: &[u32]| {
         device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -641,11 +684,25 @@ fn run(ctx: &GpuContext, input: &SynthesisInput, params: &Params, sched: &Schedu
     // groups[s][n]: style buffer `s` and NNF buffer `n` are the current ones.
     let group = |s: usize, n: usize| {
         let bufs: [&wgpu::Buffer; 12] = [
-            &src, &tgt_guide, &tgt_mod, &style[s], &style[1 - s], &nnf[n], &nnf[1 - n], &err, &omega,
-            &mask, &mask_tmp, &rng,
+            &src,
+            &tgt_guide,
+            &tgt_mod,
+            &style[s],
+            &style[1 - s],
+            &nnf[n],
+            &nnf[1 - n],
+            &err,
+            &omega,
+            &mask,
+            &mask_tmp,
+            &rng,
         ];
         let mut e = vec![uniform_binding(&params_buf, params_size)];
-        e.extend(bufs.iter().enumerate().map(|(i, b)| wgpu::BindGroupEntry { binding: i as u32 + 1, resource: b.as_entire_binding() }));
+        e.extend(
+            bufs.iter()
+                .enumerate()
+                .map(|(i, b)| wgpu::BindGroupEntry { binding: i as u32 + 1, resource: b.as_entire_binding() }),
+        );
         device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("synth"), layout: bgl, entries: &e })
     };
     let groups = [[group(0, 0), group(0, 1)], [group(1, 0), group(1, 1)]];
@@ -674,7 +731,13 @@ fn run(ctx: &GpuContext, input: &SynthesisInput, params: &Params, sched: &Schedu
     let mut sub = Submitter::new(device, queue, ctx.submission_budget);
     let (mut cs, mut cn) = (0usize, 0usize); // current style / NNF buffer
     let finest = num_levels - 1;
-    sub.dispatch(&kernels.init_rng, &groups[cs][cn], (finest * slot) as u32, phases[finest].target, Cost::simple(phases[finest].target, 4));
+    sub.dispatch(
+        &kernels.init_rng,
+        &groups[cs][cn],
+        (finest * slot) as u32,
+        phases[finest].target,
+        Cost::simple(phases[finest].target, 4),
+    );
     let mut last_kernels = &*kernels;
     for (pi, ph) in phases.iter().enumerate() {
         let k = match &kernels_3x3 {
@@ -748,7 +811,13 @@ fn run(ctx: &GpuContext, input: &SynthesisInput, params: &Params, sched: &Schedu
         // Patch errors of the final field against the final image (now the current style).
         let last = phases.len() - 1;
         let ph = &phases[last];
-        sub.dispatch(&last_kernels.eval_error, &groups[cs][cn], (last * slot) as u32, ph.target, cost.patches(ph.target, ph.patch_size, 1));
+        sub.dispatch(
+            &last_kernels.eval_error,
+            &groups[cs][cn],
+            (last * slot) as u32,
+            ph.target,
+            cost.patches(ph.target, ph.patch_size, 1),
+        );
     }
     sub.flush();
 
@@ -776,7 +845,8 @@ fn run(ctx: &GpuContext, input: &SynthesisInput, params: &Params, sched: &Schedu
     }
     queue.submit([encoder.finish()]);
 
-    let readbacks: Vec<&wgpu::Buffer> = [Some(&style_out), Some(&nnf_out), err_out.as_ref()].into_iter().flatten().collect();
+    let readbacks: Vec<&wgpu::Buffer> =
+        [Some(&style_out), Some(&nnf_out), err_out.as_ref()].into_iter().flatten().collect();
     let (tx, rx) = mpsc::channel();
     for b in &readbacks {
         let tx = tx.clone();

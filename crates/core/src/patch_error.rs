@@ -180,11 +180,7 @@ impl PatchErrorEvaluator {
     pub fn nnf_errors(&self, nnf: &Nnf) -> Result<NnfErrors, Error> {
         let (tw, th) = self.target_size;
         if (nnf.width(), nnf.height()) != (tw, th) {
-            return invalid(format!(
-                "NNF is {}x{}, but the target is {tw}x{th}",
-                nnf.width(),
-                nnf.height()
-            ));
+            return invalid(format!("NNF is {}x{}, but the target is {tw}x{th}", nnf.width(), nnf.height()));
         }
         let (xs, ys) = self.source_centres();
         if let Some((i, s)) = nnf.data().iter().enumerate().find(|(_, s)| !xs.contains(&s[0]) || !ys.contains(&s[1])) {
@@ -317,7 +313,9 @@ mod tests {
                 for (k, (&a, &b)) in style.pixel(tx, ty).iter().zip(inp.source_style.pixel(sx, sy)).enumerate() {
                     es += inp.style_weights[k] as f64 * (a as f64 - b as f64).powi(2);
                 }
-                for (k, (&a, &b)) in inp.target_guide.pixel(tx, ty).iter().zip(inp.source_guide.pixel(sx, sy)).enumerate() {
+                for (k, (&a, &b)) in
+                    inp.target_guide.pixel(tx, ty).iter().zip(inp.source_guide.pixel(sx, sy)).enumerate()
+                {
                     eg += inp.guide_weights[k] as f64 * (a as f64 - b as f64).powi(2);
                 }
             }
@@ -332,7 +330,8 @@ mod tests {
         let style = test_image(17, 13, 3);
         let inp = input(&src, &tgt);
         let ev = PatchErrorEvaluator::new(&inp, &style, 5).unwrap();
-        let (total, st, gd) = (ev.distance(ErrorPart::Total), ev.distance(ErrorPart::Style), ev.distance(ErrorPart::Guide));
+        let (total, st, gd) =
+            (ev.distance(ErrorPart::Total), ev.distance(ErrorPart::Style), ev.distance(ErrorPart::Guide));
         for (t, s) in [([8, 6], [10, 9]), ([0, 0], [2, 2]), ([16, 12], [20, 16]), ([3, 12], [11, 5])] {
             let (es, eg) = reference(&inp, &style, 5, t, s);
             let close = |a: f32, b: f64| (a as f64 - b).abs() <= 1e-4 * b.max(1.0);

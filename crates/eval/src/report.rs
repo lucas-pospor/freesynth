@@ -119,7 +119,8 @@ impl Report {
 
     pub fn load(path: impl AsRef<Path>) -> Result<Self, Error> {
         let path = path.as_ref();
-        let text = std::fs::read_to_string(path).map_err(|e| Error::Invalid(format!("cannot read '{}': {e}", path.display())))?;
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| Error::Invalid(format!("cannot read '{}': {e}", path.display())))?;
         Self::from_json(&text).map_err(|e| Error::Invalid(format!("'{}': {e}", path.display())))
     }
 

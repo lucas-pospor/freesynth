@@ -30,7 +30,8 @@ pub fn save_flo(flow: &FlowField, path: impl AsRef<Path>) -> Result<(), Error> {
 /// Loads a `.flo` file.
 pub fn load_flo(path: impl AsRef<Path>) -> Result<FlowField, Error> {
     let path = path.as_ref();
-    let file = std::fs::File::open(path).map_err(|e| Error::Invalid(format!("cannot open '{}': {e}", path.display())))?;
+    let file =
+        std::fs::File::open(path).map_err(|e| Error::Invalid(format!("cannot open '{}': {e}", path.display())))?;
     read_flo(std::io::BufReader::new(file)).map_err(|e| Error::Invalid(format!("'{}': {e}", path.display())))
 }
 
@@ -59,7 +60,11 @@ mod tests {
 
     #[test]
     fn round_trip() {
-        let flow = FlowField::from_vec(3, 2, vec![[0.0, 0.0], [1.5, -2.25], [-0.125, 1e10], [3.0, 4.0], [f32::MIN_POSITIVE, 0.0], [7.0, -8.0]]);
+        let flow = FlowField::from_vec(
+            3,
+            2,
+            vec![[0.0, 0.0], [1.5, -2.25], [-0.125, 1e10], [3.0, 4.0], [f32::MIN_POSITIVE, 0.0], [7.0, -8.0]],
+        );
         let mut buf = Vec::new();
         write_flo(&flow, &mut buf).unwrap();
         assert_eq!(buf.len(), 12 + 6 * 8);

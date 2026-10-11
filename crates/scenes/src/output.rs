@@ -221,7 +221,8 @@ pub fn write_scene(params: &SceneParams, name: &str, dir: &Path) -> Result<Scene
 /// Writes an 8-bit PNG with fast compression (scenes are regenerated often).
 fn save_png(path: &Path, data: &[u8], w: u32, h: u32, color: ExtendedColorType) -> Result<(), Error> {
     let mut file = BufWriter::new(fs::File::create(path)?);
-    PngEncoder::new_with_quality(&mut file, CompressionType::Fast, FilterType::Adaptive).write_image(data, w, h, color)?;
+    PngEncoder::new_with_quality(&mut file, CompressionType::Fast, FilterType::Adaptive)
+        .write_image(data, w, h, color)?;
     file.flush()?;
     Ok(())
 }

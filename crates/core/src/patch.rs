@@ -102,7 +102,21 @@ impl<'a> PatchSpace<'a> {
         for (i, w) in row_weights[..row_len].iter_mut().enumerate() {
             *w = weights[i % nc];
         }
-        Self { tw, th, sw, sh, nc, ns, patch, target, source, weights, row_weights, modulation, simd: simd::Token::detect() }
+        Self {
+            tw,
+            th,
+            sw,
+            sh,
+            nc,
+            ns,
+            patch,
+            target,
+            source,
+            weights,
+            row_weights,
+            modulation,
+            simd: simd::Token::detect(),
+        }
     }
 
     /// The kernel to use for this level.
@@ -432,7 +446,10 @@ mod simd {
                         _mm512_loadu_ps(w.as_ptr().add(i)),
                     )
                 };
-                let d = _mm512_sub_ps(_mm512_cvtepi32_ps(_mm512_cvtepu8_epi32(va)), _mm512_cvtepi32_ps(_mm512_cvtepu8_epi32(vb)));
+                let d = _mm512_sub_ps(
+                    _mm512_cvtepi32_ps(_mm512_cvtepu8_epi32(va)),
+                    _mm512_cvtepi32_ps(_mm512_cvtepu8_epi32(vb)),
+                );
                 acc = _mm512_add_ps(acc, _mm512_mul_ps(_mm512_mul_ps(vw, d), d));
                 i += LANES;
             }
@@ -509,8 +526,10 @@ mod tests {
         let w = [1.0f32, 1.0];
         let full = vec![255u8; n];
         let half = vec![51u8; n]; // 0.2
-        let e_full = PatchSpace::new((5, 5), (5, 5), 1, 3, &t, &s, &w, Some(&full)).error::<MODULATED>(2, 2, 2, 2, f32::MAX);
-        let e_half = PatchSpace::new((5, 5), (5, 5), 1, 3, &t, &s, &w, Some(&half)).error::<MODULATED>(2, 2, 2, 2, f32::MAX);
+        let e_full =
+            PatchSpace::new((5, 5), (5, 5), 1, 3, &t, &s, &w, Some(&full)).error::<MODULATED>(2, 2, 2, 2, f32::MAX);
+        let e_half =
+            PatchSpace::new((5, 5), (5, 5), 1, 3, &t, &s, &w, Some(&half)).error::<MODULATED>(2, 2, 2, 2, f32::MAX);
         assert_eq!(e_full, 900.0);
         assert!((e_half - 180.0).abs() < 1e-3);
     }

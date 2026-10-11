@@ -164,11 +164,17 @@ impl FlowBank {
         estimators: usize,
         capacity: usize,
     ) -> Result<Self, VideoError> {
-        let estimators = (0..estimators.max(1)).map(|_| provider.flow_estimator(width, height, params)).collect::<Result<_, _>>()?;
+        let estimators =
+            (0..estimators.max(1)).map(|_| provider.flow_estimator(width, height, params)).collect::<Result<_, _>>()?;
         Ok(Self {
             estimators: Mutex::new(estimators),
             estimator_free: Condvar::new(),
-            cache: Mutex::new(Cache { flows: HashMap::new(), pending: HashSet::new(), clock: 0, capacity: capacity.max(2) }),
+            cache: Mutex::new(Cache {
+                flows: HashMap::new(),
+                pending: HashSet::new(),
+                clock: 0,
+                capacity: capacity.max(2),
+            }),
             cache_changed: Condvar::new(),
             computed: AtomicUsize::new(0),
             reused: AtomicUsize::new(0),

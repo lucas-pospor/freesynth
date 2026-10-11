@@ -46,10 +46,9 @@ impl std::str::FromStr for Preset {
     type Err = FlowError;
 
     fn from_str(s: &str) -> Result<Self, FlowError> {
-        Preset::ALL
-            .into_iter()
-            .find(|p| p.name().eq_ignore_ascii_case(s))
-            .ok_or_else(|| FlowError::InvalidInput(format!("unknown flow preset '{s}' (ultrafast, fast, medium, high)")))
+        Preset::ALL.into_iter().find(|p| p.name().eq_ignore_ascii_case(s)).ok_or_else(|| {
+            FlowError::InvalidInput(format!("unknown flow preset '{s}' (ultrafast, fast, medium, high)"))
+        })
     }
 }
 
@@ -187,7 +186,8 @@ impl DisParams {
         if !(1..=PATCH_SIZE).contains(&self.patch_stride) {
             return invalid(format!("patch stride must be 1..={PATCH_SIZE}, got {}", self.patch_stride));
         }
-        let iterations = [self.gd_iterations, self.propagation_iterations, self.vr_iterations, self.vr_inner_iterations];
+        let iterations =
+            [self.gd_iterations, self.propagation_iterations, self.vr_iterations, self.vr_inner_iterations];
         if iterations.iter().any(|&n| n > 1000) {
             return invalid("iteration counts must be at most 1000");
         }

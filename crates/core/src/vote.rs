@@ -54,7 +54,13 @@ pub fn vote_plain(target: &mut Image, source: &Image, nnf: &Nnf, patch_size: usi
 
 /// [`vote_plain`] for `N` channels: the accumulator lives in registers and the patch window is
 /// clipped to the target once per pixel. Accumulation order is the same as the original's.
-fn vote_plain_n<const N: usize>(target: &mut Image, source: &Image, nnf: &Nnf, patch_size: usize, rounding: VoteRounding) {
+fn vote_plain_n<const N: usize>(
+    target: &mut Image,
+    source: &Image,
+    nnf: &Nnf,
+    patch_size: usize,
+    rounding: VoteRounding,
+) {
     let (w, h) = (nnf.width(), nnf.height());
     let r = patch_size / 2;
     let (sw, sh) = (source.width() as i32, source.height() as i32);
@@ -140,7 +146,14 @@ fn vote_plain_any(target: &mut Image, source: &Image, nnf: &Nnf, patch_size: usi
 ///
 /// `errors` holds the per-target-pixel patch errors of `nnf`. Averages are converted with
 /// `rounding`.
-pub fn vote_weighted(target: &mut Image, source: &Image, nnf: &Nnf, errors: &[f32], patch_size: usize, rounding: VoteRounding) {
+pub fn vote_weighted(
+    target: &mut Image,
+    source: &Image,
+    nnf: &Nnf,
+    errors: &[f32],
+    patch_size: usize,
+    rounding: VoteRounding,
+) {
     let (w, h) = (nnf.width(), nnf.height());
     assert_eq!(target.size(), (w, h), "vote target must match the NNF size");
     assert_eq!(target.channels(), source.channels());
@@ -172,7 +185,14 @@ pub fn vote_weighted(target: &mut Image, source: &Image, nnf: &Nnf, errors: &[f3
 /// Away from the target border, and when every field entry is a valid patch centre (as the
 /// engine's always are), no coordinate can need clamping, so those pixels take a loop without
 /// clamps.
-fn vote_weighted_n<const N: usize>(target: &mut Image, source: &Image, nnf: &Nnf, weights: &[f32], patch_size: usize, rounding: VoteRounding) {
+fn vote_weighted_n<const N: usize>(
+    target: &mut Image,
+    source: &Image,
+    nnf: &Nnf,
+    weights: &[f32],
+    patch_size: usize,
+    rounding: VoteRounding,
+) {
     let (w, h) = (nnf.width() as i32, nnf.height() as i32);
     let r = (patch_size / 2) as i32;
     let (sw, sh) = (source.width() as i32, source.height() as i32);
@@ -231,7 +251,14 @@ fn vote_weighted_n<const N: usize>(target: &mut Image, source: &Image, nnf: &Nnf
 }
 
 /// [`vote_weighted`] for any channel count, with precomputed per-pixel `weights`.
-fn vote_weighted_any(target: &mut Image, source: &Image, nnf: &Nnf, weights: &[f32], patch_size: usize, rounding: VoteRounding) {
+fn vote_weighted_any(
+    target: &mut Image,
+    source: &Image,
+    nnf: &Nnf,
+    weights: &[f32],
+    patch_size: usize,
+    rounding: VoteRounding,
+) {
     let (w, h) = (nnf.width(), nnf.height());
     let nc = source.channels();
     let r = (patch_size / 2) as i32;
@@ -478,7 +505,8 @@ mod tests {
     #[test]
     fn weighted_vote_prefers_low_error_patches() {
         // Two candidate colours; the low-error patch must dominate.
-        let src = Image::from_raw(6, 3, 1, vec![0, 0, 0, 200, 200, 200, 0, 0, 0, 200, 200, 200, 0, 0, 0, 200, 200, 200]);
+        let src =
+            Image::from_raw(6, 3, 1, vec![0, 0, 0, 200, 200, 200, 0, 0, 0, 200, 200, 200, 0, 0, 0, 200, 200, 200]);
         // Target 2x1: pixel 0 maps into the dark half, pixel 1 into the bright half.
         let nnf = Nnf::from_raw(2, 1, vec![[1, 1], [4, 1]]);
         let mut plain = Image::new(2, 1, 1);

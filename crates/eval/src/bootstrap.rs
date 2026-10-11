@@ -113,7 +113,12 @@ pub fn paired_bootstrap(a: &[f64], b: &[f64], cfg: &BootstrapConfig) -> Result<P
 /// [`paired_bootstrap`] for units in a serially correlated order (for example consecutive frame
 /// pairs): each resample joins randomly placed runs of `block` consecutive units (the last run
 /// cut short) until it has as many units as the data. `block` is capped at the number of units.
-pub fn paired_block_bootstrap(a: &[f64], b: &[f64], cfg: &BootstrapConfig, block: usize) -> Result<PairedComparison, Error> {
+pub fn paired_block_bootstrap(
+    a: &[f64],
+    b: &[f64],
+    cfg: &BootstrapConfig,
+    block: usize,
+) -> Result<PairedComparison, Error> {
     if block == 0 {
         return invalid("block length must be at least 1");
     }
@@ -139,7 +144,8 @@ fn resample(a: &[f64], b: &[f64], cfg: &BootstrapConfig, block: usize) -> Result
     let mut rng = SplitMix64::new(cfg.seed);
     let mut diffs = Vec::with_capacity(cfg.resamples);
     let mut rels = Vec::with_capacity(cfg.resamples);
-    let ratios: Option<Vec<f64>> = a.iter().all(|&x| x > 0.0).then(|| a.iter().zip(b).map(|(x, y)| y / x - 1.0).collect());
+    let ratios: Option<Vec<f64>> =
+        a.iter().all(|&x| x > 0.0).then(|| a.iter().zip(b).map(|(x, y)| y / x - 1.0).collect());
     let mut ratio_means = Vec::with_capacity(cfg.resamples);
     for _ in 0..cfg.resamples {
         let (mut sa, mut sb, mut sr) = (0.0, 0.0, 0.0);

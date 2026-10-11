@@ -460,7 +460,10 @@ fn run_inner(args: &[String]) -> Result<(), u8> {
             return Err(1);
         }
         if i > 0 && target.size() != guides.first().map(|g: &GuideLayer| g.target.size()).unwrap_or_default() {
-            println!("error: target guide '{}' doesn't match the resolution of '{}'", g.target_file, o.guides[0].target_file);
+            println!(
+                "error: target guide '{}' doesn't match the resolution of '{}'",
+                g.target_file, o.guides[0].target_file
+            );
             return Err(1);
         }
         num_guide_channels += io::eval_num_channels(&source).max(io::eval_num_channels(&target));
@@ -641,20 +644,29 @@ mod tests {
         // -compat runs the 2019 schedule.
         let s = schedule("-style a.png -guide b.png c.png -compat", Engine::Cpu);
         assert_eq!((s.search_vote_iters, s.patch_match_iters), (vec![6; 7], vec![4; 7]));
-        assert_eq!((s.vote_mode, s.vote_rounding, s.use_stop_threshold), (VoteMode::Plain, VoteRounding::Truncate, false));
+        assert_eq!(
+            (s.vote_mode, s.vote_rounding, s.use_stop_threshold),
+            (VoteMode::Plain, VoteRounding::Truncate, false)
+        );
     }
 
     #[test]
     fn presets_and_overrides() {
         let s = schedule("-style a -guide b c", Engine::Gpu);
-        assert_eq!((s.patch_match_iters, s.vote_mode, s.vote_rounding), (vec![2; 7], VoteMode::Weighted, VoteRounding::Nearest));
+        assert_eq!(
+            (s.patch_match_iters, s.vote_mode, s.vote_rounding),
+            (vec![2; 7], VoteMode::Weighted, VoteRounding::Nearest)
+        );
         let s = schedule("-style a -guide b c -patchsize 3", Engine::Cpu);
         assert_eq!(s.patch_match_iters, vec![4; 7]);
         let s = schedule("-style a -guide b c -preset fast", Engine::Gpu);
         assert_eq!(s.search_vote_iters, [6, 6, 6, 6, 6, 6, 4]);
         assert!(s.use_stop_threshold);
         // Explicit options win over the preset.
-        let s = schedule("-style a -guide b c -preset fast -searchvoteiters 5 -patchmatchiters 1 -stopmask off -vote plain", Engine::Gpu);
+        let s = schedule(
+            "-style a -guide b c -preset fast -searchvoteiters 5 -patchmatchiters 1 -stopmask off -vote plain",
+            Engine::Gpu,
+        );
         assert_eq!((s.search_vote_iters, s.patch_match_iters), (vec![5; 7], vec![1; 7]));
         assert_eq!((s.use_stop_threshold, s.vote_mode), (false, VoteMode::Plain));
         let s = schedule("-style a -guide b c -preset high", Engine::Cpu);
@@ -671,7 +683,10 @@ mod tests {
         assert_eq!(o.preset(), Preset::Compat);
         let o = parse_args(&args("-style a -guide b c -bitexact -preset high")).ok().unwrap();
         assert_eq!(o.preset(), Preset::High);
-        assert_eq!(build_params(&o, 7).schedule_for_levels(7, Engine::Cpu).unwrap().vote_rounding, VoteRounding::Truncate);
+        assert_eq!(
+            build_params(&o, 7).schedule_for_levels(7, Engine::Cpu).unwrap().vote_rounding,
+            VoteRounding::Truncate
+        );
     }
 
     #[test]
@@ -694,7 +709,8 @@ mod tests {
 
     #[test]
     fn weights_apply_to_preceding_layer() {
-        let o = parse_args(&args("-style s.png -weight 2 -guide a b -guide c d -weight 0.5 -output o.png")).ok().unwrap();
+        let o =
+            parse_args(&args("-style s.png -weight 2 -guide a b -guide c d -weight 0.5 -output o.png")).ok().unwrap();
         assert_eq!(o.style_weight, 2.0);
         assert_eq!(o.guides[0].weight, -1.0);
         assert_eq!(o.guides[1].weight, 0.5);

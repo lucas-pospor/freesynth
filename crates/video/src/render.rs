@@ -322,7 +322,14 @@ impl<'a> Renderer<'a> {
             masks: shot.mask.map(|m| FrameCache::new(m, resources.frame_cache_bytes, spill.store("masks"))),
             styles: keys.into_iter().map(|k| Arc::new(k.style)).collect(),
             identity_map: encode_positions(&PositionField::identity(size.0, size.1), size),
-            flows: FlowBank::new(flow_provider, size.0, size.1, &self.params.flow, parallel.min(4), resources.flow_cache_flows)?,
+            flows: FlowBank::new(
+                flow_provider,
+                size.0,
+                size.1,
+                &self.params.flow,
+                parallel.min(4),
+                resources.flow_cache_flows,
+            )?,
             buffers: SpillStore::new(resources.buffer_bytes, spill.store("passes")),
             keyframe_results: (0..plan.keyframes.len()).map(|_| OnceLock::new()).collect(),
             tasks: Mutex::new(tasks),
@@ -446,7 +453,8 @@ impl<'a> Renderer<'a> {
         let w = &self.params.weights;
         let style = &job.styles[key];
         let key_video = job.frames.get(job.plan.keyframes[key])?;
-        let mut guides = vec![GuideLayer::new((*key_video).clone(), (*job.frames.get(t)?).clone()).with_weight(w.video)];
+        let mut guides =
+            vec![GuideLayer::new((*key_video).clone(), (*job.frames.get(t)?).clone()).with_weight(w.video)];
         if let Some(warped) = temporal.filter(|_| w.temporal > 0.0) {
             guides.push(GuideLayer::new((**style).clone(), warped).with_weight(w.temporal));
         }
@@ -464,16 +472,28 @@ impl<'a> Renderer<'a> {
             }
             guides.push(GuideLayer::new(alpha_as_gray(style), (*mask).clone()).with_weight(w.mask));
         }
-        SynthesisInput::from_rgba_layers(style, Some(w.style), &guides).map_err(|e| VideoError::InvalidInput(e.to_string()))
+        SynthesisInput::from_rgba_layers(style, Some(w.style), &guides)
+            .map_err(|e| VideoError::InvalidInput(e.to_string()))
     }
 
-    fn synthesize(&self, job: &Job<'_>, input: &SynthesisInput, frame: usize, key: usize) -> Result<Arc<Image>, VideoError> {
+    fn synthesize(
+        &self,
+        job: &Job<'_>,
+        input: &SynthesisInput,
+        frame: usize,
+        key: usize,
+    ) -> Result<Arc<Image>, VideoError> {
         let start = Instant::now();
         let out = catch_unwind(AssertUnwindSafe(|| self.synthesizer.synthesize(input, &self.params.synthesis)))
             .unwrap_or_else(|e| Err(panicked("the synthesis engine", &*e)))?;
         job.synthesis_nanos.fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
         let done = job.synthesized.fetch_add(1, Ordering::Relaxed) + 1;
-        self.report(Progress::Synthesized { frame, keyframe: job.plan.keyframes[key], done, total: job.plan.num_syntheses() })?;
+        self.report(Progress::Synthesized {
+            frame,
+            keyframe: job.plan.keyframes[key],
+            done,
+            total: job.plan.num_syntheses(),
+        })?;
         Ok(Arc::new(out.image))
     }
 

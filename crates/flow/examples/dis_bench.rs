@@ -65,7 +65,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dir = dir.ok_or("usage: dis_bench FRAME_DIR [--preset P] [--runs N] [--pairs N]")?;
     let mut paths: Vec<_> = std::fs::read_dir(&dir)?.filter_map(|e| e.ok().map(|e| e.path())).collect();
     paths.sort();
-    let frames: Vec<image::RgbaImage> = paths.iter().filter_map(|p| image::open(p).ok().map(|i| i.to_rgba8())).collect();
+    let frames: Vec<image::RgbaImage> =
+        paths.iter().filter_map(|p| image::open(p).ok().map(|i| i.to_rgba8())).collect();
     if frames.len() < 2 {
         return Err("need at least two frames".into());
     }
@@ -76,7 +77,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     params.propagation_passes = prop.unwrap_or(params.propagation_passes);
     params.vr_iterations = vr.unwrap_or(params.vr_iterations);
     if cpu {
-        let gray: Vec<GrayImage> = frames.iter().map(|f| GrayImage::from_rgba8(w, h, f.as_raw())).collect::<Result<_, _>>()?;
+        let gray: Vec<GrayImage> =
+            frames.iter().map(|f| GrayImage::from_rgba8(w, h, f.as_raw())).collect::<Result<_, _>>()?;
         return bench_cpu(&gray, &params, pairs, runs, threads, pair);
     }
 
@@ -151,7 +153,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     while warm.elapsed().as_secs_f64() < WARM_UP_SECONDS {
         batched()?;
     }
-    let (mut med, mut span): (Vec<f64>, Vec<f64>) = (0..runs).map(|_| batched()).collect::<Result<Vec<_>, _>>()?.into_iter().unzip();
+    let (mut med, mut span): (Vec<f64>, Vec<f64>) =
+        (0..runs).map(|_| batched()).collect::<Result<Vec<_>, _>>()?.into_iter().unzip();
     println!(
         "GPU time per flow (timestamps, one submission): median {:.3} ms, span/pairs {:.3} ms (medians of {runs} runs; run medians {:.3}-{:.3} ms)",
         median(&mut med),
@@ -181,7 +184,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     while warm.elapsed().as_secs_f64() < WARM_UP_SECONDS {
         end_to_end()?;
     }
-    let (mut med, mut mean): (Vec<f64>, Vec<f64>) = (0..runs).map(|_| end_to_end()).collect::<Result<Vec<_>, _>>()?.into_iter().unzip();
+    let (mut med, mut mean): (Vec<f64>, Vec<f64>) =
+        (0..runs).map(|_| end_to_end()).collect::<Result<Vec<_>, _>>()?.into_iter().unzip();
     println!(
         "End to end per flow (upload + compute + readback): median {:.3} ms, mean {:.3} ms (medians of {runs} runs)",
         median(&mut med),

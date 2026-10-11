@@ -156,7 +156,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let epe = flow.mean_epe(&truth, mask.as_deref()).ok_or("no unoccluded pixels")?;
             groups.entry(cols[0].to_owned()).or_default().push(epe);
             if let (Some(_), Some(c)) = (&gpu_flow, &cpu_flow) {
-                cpu_groups.entry(cols[0].to_owned()).or_default().push(c.mean_epe(&truth, mask.as_deref()).ok_or("no unoccluded pixels")?);
+                cpu_groups
+                    .entry(cols[0].to_owned())
+                    .or_default()
+                    .push(c.mean_epe(&truth, mask.as_deref()).ok_or("no unoccluded pixels")?);
             }
         }
     }
@@ -172,7 +175,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (group, v) in &apart {
         let col = |i: usize| v.iter().map(|s| s[i]).collect::<Vec<_>>();
         let max = col(2).into_iter().fold(0.0, f64::max);
-        println!("{group:24} GPU-CPU distance: mean {:.5} px, p99 {:.4} px (means over pairs), max {max:.3} px", mean(&col(0)), mean(&col(1)));
+        println!(
+            "{group:24} GPU-CPU distance: mean {:.5} px, p99 {:.4} px (means over pairs), max {max:.3} px",
+            mean(&col(0)),
+            mean(&col(1))
+        );
     }
     Ok(())
 }

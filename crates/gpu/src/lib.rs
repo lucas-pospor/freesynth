@@ -114,8 +114,11 @@ fn check_limits(limits: &wgpu::Limits) -> Result<(), String> {
         ("max_bind_groups", limits.max_bind_groups, 1),
         ("max_dynamic_uniform_buffers_per_pipeline_layout", limits.max_dynamic_uniform_buffers_per_pipeline_layout, 1),
     ];
-    let missing: Vec<String> =
-        checks.iter().filter(|(_, have, need)| have < need).map(|(name, have, need)| format!("{name} is {have}, needs {need}")).collect();
+    let missing: Vec<String> = checks
+        .iter()
+        .filter(|(_, have, need)| have < need)
+        .map(|(name, have, need)| format!("{name} is {have}, needs {need}"))
+        .collect();
     if missing.is_empty() { Ok(()) } else { Err(missing.join("; ")) }
 }
 
@@ -130,7 +133,8 @@ impl GpuContext {
         .map_err(|_| GpuError::NoAdapter)?;
         let info = adapter.get_info();
         let available = adapter.limits();
-        check_limits(&available).map_err(|m| GpuError::Device(format!("adapter '{}' is too limited: {m}", info.name)))?;
+        check_limits(&available)
+            .map_err(|m| GpuError::Device(format!("adapter '{}' is too limited: {m}", info.name)))?;
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("freesynth"),
             required_limits: Self::required_limits(&available),
@@ -181,13 +185,17 @@ impl GpuContext {
     ///   only costs speed.
     pub fn required_limits_from(base: &wgpu::Limits, adapter_limits: &wgpu::Limits) -> wgpu::Limits {
         wgpu::Limits {
-            max_storage_buffers_per_shader_stage: base.max_storage_buffers_per_shader_stage.max(REQUIRED_STORAGE_BUFFERS),
+            max_storage_buffers_per_shader_stage: base
+                .max_storage_buffers_per_shader_stage
+                .max(REQUIRED_STORAGE_BUFFERS),
             max_compute_invocations_per_workgroup: base.max_compute_invocations_per_workgroup.max(REQUIRED_INVOCATIONS),
             max_compute_workgroup_size_x: base.max_compute_workgroup_size_x.max(REQUIRED_WORKGROUP_SIZE),
             max_compute_workgroup_size_y: base.max_compute_workgroup_size_y.max(REQUIRED_WORKGROUP_SIZE),
             max_compute_workgroups_per_dimension: base.max_compute_workgroups_per_dimension.max(1),
             max_bind_groups: base.max_bind_groups.max(1),
-            max_dynamic_uniform_buffers_per_pipeline_layout: base.max_dynamic_uniform_buffers_per_pipeline_layout.max(1),
+            max_dynamic_uniform_buffers_per_pipeline_layout: base
+                .max_dynamic_uniform_buffers_per_pipeline_layout
+                .max(1),
             max_storage_buffer_binding_size: base
                 .max_storage_buffer_binding_size
                 .max(adapter_limits.max_storage_buffer_binding_size),
@@ -399,9 +407,11 @@ mod tests {
         assert!(psnr(&out.image, &img) > 35.0);
 
         // Multi-word and partial-word layouts: 5 style + 3 guide channels, 1 style + 9 guide.
-        let five = Image::from_raw(64, 64, 5, img.data().chunks(3).flat_map(|p| [p[0], p[1], p[2], p[0], p[1]]).collect());
+        let five =
+            Image::from_raw(64, 64, 5, img.data().chunks(3).flat_map(|p| [p[0], p[1], p[2], p[0], p[1]]).collect());
         let one = Image::from_raw(64, 64, 1, img.data().chunks(3).map(|p| p[1]).collect());
-        let nine = Image::from_raw(64, 64, 9, img.data().chunks(3).flat_map(|p| [p[0], p[1], p[2]].repeat(3)).collect());
+        let nine =
+            Image::from_raw(64, 64, 9, img.data().chunks(3).flat_map(|p| [p[0], p[1], p[2]].repeat(3)).collect());
         for (style, guide) in [(&five, &img), (&one, &nine)] {
             let input = SynthesisInput {
                 source_style: style.clone(),
@@ -580,7 +590,9 @@ mod tests {
         assert_eq!(counts[1], 1);
         assert!(counts[0] > 100, "{counts:?}");
 
-        for (search, extra_pass_3x3) in [(SearchMode::Improved, false), (SearchMode::Improved, true), (SearchMode::Compat, false)] {
+        for (search, extra_pass_3x3) in
+            [(SearchMode::Improved, false), (SearchMode::Improved, true), (SearchMode::Compat, false)]
+        {
             let params = Params { uniformity_weight: 0.0, extra_pass_3x3, search: Some(search), ..Params::default() };
             let mut outputs = Vec::new();
             for budget in [u64::MAX, 1, 2_000_000] {
@@ -590,7 +602,9 @@ mod tests {
             }
             let (_, _, reference) = &outputs[0];
             for (budget, submissions, out) in &outputs[1..] {
-                let case = format!("budget {budget} ({submissions} submissions), {search} search, extra pass {extra_pass_3x3}");
+                let case = format!(
+                    "budget {budget} ({submissions} submissions), {search} search, extra pass {extra_pass_3x3}"
+                );
                 assert_eq!(out.nnf, reference.nnf, "{case}");
                 assert_eq!(out.image, reference.image, "{case}");
             }

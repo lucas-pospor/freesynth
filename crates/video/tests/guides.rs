@@ -87,7 +87,15 @@ struct TestScene {
 
 impl TestScene {
     fn new(width: usize, height: usize, frames: usize, motion: f64) -> Self {
-        let params = SceneParams { width, height, frames, seed: 7, motion, family: StyleFamily::Rigid, ..SceneParams::default() };
+        let params = SceneParams {
+            width,
+            height,
+            frames,
+            seed: 7,
+            motion,
+            family: StyleFamily::Rigid,
+            ..SceneParams::default()
+        };
         let scene = Scene::new(&params).unwrap();
         let (video, truth): (Vec<_>, Vec<_>) = (0..frames)
             .map(|t| {
@@ -111,12 +119,23 @@ impl TestScene {
 }
 
 fn params(gate: bool) -> VideoParams {
-    VideoParams { weights: WEIGHTS, flow: DisParams::preset(FlowPreset::Medium), gate_mapping: gate, ..VideoParams::classic() }
+    VideoParams {
+        weights: WEIGHTS,
+        flow: DisParams::preset(FlowPreset::Medium),
+        gate_mapping: gate,
+        ..VideoParams::classic()
+    }
 }
 
 /// Renders the shot with a single keyframe with the capturing engine and returns the inputs in
 /// synthesis order: the keyframe's frame first, then the chain walking away from it.
-fn capture(scene: &TestScene, key: usize, style: Image, mask: Option<&MemoryFrames>, gate: bool) -> Vec<SynthesisInput> {
+fn capture(
+    scene: &TestScene,
+    key: usize,
+    style: Image,
+    mask: Option<&MemoryFrames>,
+    gate: bool,
+) -> Vec<SynthesisInput> {
     let shot = Shot {
         frames: &scene.video,
         keyframes: vec![Keyframe { frame: key, style }],
@@ -154,7 +173,8 @@ fn check_temporal(scene: &TestScene, key: usize, frames: impl Iterator<Item = us
     assert!(layer(&inputs[0], WEIGHTS.temporal).is_none(), "the keyframe's frame has no temporal guide");
     let mut prev = key;
     for (input, t) in inputs[1..].iter().zip(frames) {
-        let channels_of = |weight| layer(input, weight).unwrap_or_else(|| panic!("frame {t}: no layer of weight {weight}"));
+        let channels_of =
+            |weight| layer(input, weight).unwrap_or_else(|| panic!("frame {t}: no layer of weight {weight}"));
         // The previous output is the previous frame's video (the engine echoes it).
         let previous_output = to_rgba(&scene.video_rgb(prev));
         let temporal = channels_of(WEIGHTS.temporal);
@@ -174,7 +194,14 @@ impl TestScene {
     /// Frame `t` of the video as an RGB image (what the capturing engine outputs).
     fn video_rgb(&self, t: usize) -> Image {
         let (w, h) = self.size();
-        let data = freesynth_video::FrameSource::load(&self.video, t).unwrap().data().as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect();
+        let data = freesynth_video::FrameSource::load(&self.video, t)
+            .unwrap()
+            .data()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .flat_map(|p| [p[0], p[1], p[2]])
+            .collect();
         Image::from_raw(w, h, 3, data)
     }
 }

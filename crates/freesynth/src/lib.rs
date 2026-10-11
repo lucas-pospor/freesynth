@@ -38,6 +38,6 @@ pub use crate::project::Project;
 pub use crate::session::{Session, SessionOptions};
 pub use freesynth_video::{
     Backend, BlendMode, CancelToken, ComputeDevice, FlowBackend, FrameSink, FrameSource, GuideWeights, ImageSequence,
-    ImageSequenceWriter, Keyframe, KeyframeOutput, MemoryFrames, MemorySink, Progress, RenderOptions, RenderStats, Renderer,
-    ResourcePlan, Shot, VideoError, VideoParams,
+    ImageSequenceWriter, Keyframe, KeyframeOutput, MemoryFrames, MemorySink, Progress, RenderOptions, RenderStats,
+    Renderer, ResourcePlan, Shot, VideoError, VideoParams,
 };

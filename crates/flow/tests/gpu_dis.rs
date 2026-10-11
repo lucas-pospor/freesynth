@@ -42,17 +42,21 @@ fn render(w: usize, h: usize, shift: [f32; 2]) -> GrayImage {
 
 /// Packed RGBA8 bytes of a grey image (rounded).
 fn to_rgba8(img: &GrayImage) -> Vec<u8> {
-    img.data().iter().flat_map(|&v| {
-        let g = v.round().clamp(0.0, 255.0) as u8;
-        [g, g, g, 255]
-    }).collect()
+    img.data()
+        .iter()
+        .flat_map(|&v| {
+            let g = v.round().clamp(0.0, 255.0) as u8;
+            [g, g, g, 255]
+        })
+        .collect()
 }
 
 /// Mean end-point error against a constant flow, ignoring a border of `margin` pixels.
 fn interior_epe(flow: &FlowField, truth: [f32; 2], margin: usize) -> f64 {
     let (w, h) = flow.size();
-    let mask: Vec<bool> =
-        (0..w * h).map(|i| (margin..w - margin).contains(&(i % w)) && (margin..h - margin).contains(&(i / w))).collect();
+    let mask: Vec<bool> = (0..w * h)
+        .map(|i| (margin..w - margin).contains(&(i % w)) && (margin..h - margin).contains(&(i / w)))
+        .collect();
     flow.mean_epe(&FlowField::constant(w, h, truth), Some(&mask)).unwrap()
 }
 
@@ -96,7 +100,9 @@ fn shared_device_and_batched_encoding() {
     let mut dis = GpuDis::new(&ctx, w, h, &DisParams::default()).unwrap();
 
     // Reference: one flow at a time from grey images (rounded like the RGBA data below).
-    let round = |img: &GrayImage| GrayImage::from_vec(w, h, img.data().iter().map(|v| v.round().clamp(0.0, 255.0)).collect()).unwrap();
+    let round = |img: &GrayImage| {
+        GrayImage::from_vec(w, h, img.data().iter().map(|v| v.round().clamp(0.0, 255.0)).collect()).unwrap()
+    };
     let single: Vec<FlowField> = moved.iter().map(|m| dis.compute(&round(&base), &round(m)).unwrap()).collect();
 
     let frame = |img: &GrayImage| {
@@ -126,7 +132,14 @@ fn shared_device_and_batched_encoding() {
 #[test]
 fn exact_flow_scene() {
     let Some(ctx) = context() else { return };
-    let params = SceneParams { width: 320, height: 180, frames: 6, seed: 3, family: StyleFamily::Rigid, ..SceneParams::default() };
+    let params = SceneParams {
+        width: 320,
+        height: 180,
+        frames: 6,
+        seed: 3,
+        family: StyleFamily::Rigid,
+        ..SceneParams::default()
+    };
     let scene = Scene::new(&params).unwrap();
     let (w, h) = (params.width, params.height);
     let gray = |f: &freesynth_scenes::Frame| GrayImage::from_rgb8(w, h, f.image.as_raw()).unwrap();
@@ -157,7 +170,14 @@ fn distance(a: &FlowField, b: &FlowField) -> (f64, f32) {
 #[test]
 fn cpu_and_gpu_agree() {
     let Some(ctx) = context() else { return };
-    let params = SceneParams { width: 320, height: 180, frames: 6, seed: 3, family: StyleFamily::Rigid, ..SceneParams::default() };
+    let params = SceneParams {
+        width: 320,
+        height: 180,
+        frames: 6,
+        seed: 3,
+        family: StyleFamily::Rigid,
+        ..SceneParams::default()
+    };
     let scene = Scene::new(&params).unwrap();
     let (w, h) = (params.width, params.height);
     let gray = |t: usize| GrayImage::from_rgb8(w, h, scene.render(t).image.as_raw()).unwrap();
@@ -173,7 +193,10 @@ fn cpu_and_gpu_agree() {
             let (g, c) = (gpu.compute(&f0, other).unwrap(), cpu.compute(&f0, other).unwrap());
             let (mean, p99) = distance(&g, &c);
             eprintln!("{preset}, gap {gap}: mean distance {mean:.6} px, 99th percentile {p99:.5} px");
-            assert!(mean < 0.005 && p99 < 0.02, "{preset}, gap {gap}: mean distance {mean} px, 99th percentile {p99} px");
+            assert!(
+                mean < 0.005 && p99 < 0.02,
+                "{preset}, gap {gap}: mean distance {mean} px, 99th percentile {p99} px"
+            );
         }
     }
 }
@@ -187,7 +210,10 @@ fn odd_and_tiny_sizes() {
         for preset in Preset::ALL {
             let flow = GpuDis::new(&ctx, w, h, &DisParams::preset(preset)).unwrap().compute(&a, &b).unwrap();
             assert_eq!(flow.size(), (w, h));
-            assert!(flow.data().iter().all(|v| v[0].is_finite() && v[1].is_finite()), "{w}x{h} {preset}: non-finite flow");
+            assert!(
+                flow.data().iter().all(|v| v[0].is_finite() && v[1].is_finite()),
+                "{w}x{h} {preset}: non-finite flow"
+            );
             let epe = interior_epe(&flow, shift, 0);
             assert!(epe < 0.5, "{w}x{h} {preset}: EPE {epe:.4} px");
         }

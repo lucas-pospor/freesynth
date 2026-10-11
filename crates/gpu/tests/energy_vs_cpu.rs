@@ -28,7 +28,15 @@ fn gpu_energy_matches_cpu() {
             return;
         }
     };
-    let scene = Scene::new(&SceneParams { width: 64, height: 48, frames: 8, seed: 3, family: StyleFamily::Rigid, ..SceneParams::default() }).unwrap();
+    let scene = Scene::new(&SceneParams {
+        width: 64,
+        height: 48,
+        frames: 8,
+        seed: 3,
+        family: StyleFamily::Rigid,
+        ..SceneParams::default()
+    })
+    .unwrap();
     let (f0, f5) = (scene.render(0), scene.render(5));
     let guide = GuideLayer::new(rgba(&f0.image), rgba(&f5.image)).with_weight(4.0);
     let input = SynthesisInput::from_rgba_layers(&rgba(&f0.truth), None, &[guide]).unwrap();
@@ -37,7 +45,8 @@ fn gpu_energy_matches_cpu() {
     let cpu = synthesize(&input, &params).unwrap();
     let gpu = ctx.synthesize(&input, &params).expect("GPU synthesis");
     let pixels = sample_pixels(64, 48, 400, 1);
-    let energy = |img: &Image| sampled_energy(&PatchErrorEvaluator::new(&input, img, 5).unwrap(), &pixels, None).unwrap().total;
+    let energy =
+        |img: &Image| sampled_energy(&PatchErrorEvaluator::new(&input, img, 5).unwrap(), &pixels, None).unwrap().total;
     let (e_cpu, e_gpu) = (energy(&cpu.image), energy(&gpu.image));
     let rel = e_gpu / e_cpu - 1.0;
     eprintln!("exact energy: CPU {e_cpu:.1}, GPU {e_gpu:.1} ({:+.1}%)", 100.0 * rel);

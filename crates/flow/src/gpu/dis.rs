@@ -252,14 +252,22 @@ impl GpuDis {
             level.ph = ph as u32;
             level.from_coarse = !searched;
             let (cw, ch, coarse_flow) = coarser.unwrap_or((0, 0, dummy.clone()));
-            let ub = uniform("level uniform", &LevelUniform { w: level.w, h: level.h, pw: level.pw, ph: level.ph, cw, ch, ..base });
+            let ub = uniform(
+                "level uniform",
+                &LevelUniform { w: level.w, h: level.h, pw: level.pw, ph: level.ph, cw, ch, ..base },
+            );
 
             let patches = [storage("patch flow A", pw * ph * 8), storage("patch flow B", pw * ph * 8)];
             let search_passes = if searched { passes + 1 } else { 0 };
             level.search = (0..search_passes)
                 .map(|k| {
                     let input = if k == 0 { &dummy } else { &patches[(k - 1) % 2] };
-                    bind(device, &pipelines.search_layout, &ub, &[&level.i0, &level.i1, &coarse_flow, input, &patches[k % 2]])
+                    bind(
+                        device,
+                        &pipelines.search_layout,
+                        &ub,
+                        &[&level.i0, &level.i1, &coarse_flow, input, &patches[k % 2]],
+                    )
                 })
                 .collect();
 
@@ -271,12 +279,17 @@ impl GpuDis {
             level.densify = Some(bind(device, &pipelines.densify_layout, &ub, &[&level.i0, &level.i1, source, &dense]));
             let iterations = if refined { params.vr_iterations } else { 0 };
             let dispatches = iterations.div_ceil(VR_PER_DISPATCH);
-            let iterates: Vec<wgpu::Buffer> = (0..dispatches.min(2)).map(|_| storage("refined flow", pixels * 8)).collect();
+            let iterates: Vec<wgpu::Buffer> =
+                (0..dispatches.min(2)).map(|_| storage("refined flow", pixels * 8)).collect();
             level.refine = (0..dispatches)
                 .map(|k| {
                     let input = if k == 0 { &dense } else { &iterates[(k - 1) % 2] };
-                    let group =
-                        bind(device, &pipelines.refine_layout, &ub, &[&level.i0, &level.i1, &dense, input, &iterates[k % 2]]);
+                    let group = bind(
+                        device,
+                        &pipelines.refine_layout,
+                        &ub,
+                        &[&level.i0, &level.i1, &dense, input, &iterates[k % 2]],
+                    );
                     (group, VR_PER_DISPATCH.min(iterations - k * VR_PER_DISPATCH))
                 })
                 .collect();
@@ -294,7 +307,8 @@ impl GpuDis {
 
         let output = plan.output_level();
         let (ow, oh) = plan.level_size(output);
-        let load_uniform = uniform("load uniform", &LevelUniform { w: plan.width as u32, h: plan.height as u32, ..base });
+        let load_uniform =
+            uniform("load uniform", &LevelUniform { w: plan.width as u32, h: plan.height as u32, ..base });
         let upsample_uniform = uniform(
             "upsample uniform",
             &LevelUniform {
@@ -306,7 +320,16 @@ impl GpuDis {
                 ..base
             },
         );
-        Self { ctx: ctx.clone(), params: params.clone(), plan, levels, pipelines, load_uniform, upsample_uniform, host: None }
+        Self {
+            ctx: ctx.clone(),
+            params: params.clone(),
+            plan,
+            levels,
+            pipelines,
+            load_uniform,
+            upsample_uniform,
+            host: None,
+        }
     }
 
     pub fn params(&self) -> &DisParams {
@@ -356,7 +379,8 @@ impl GpuDis {
         let p = &self.pipelines;
         let format = usize::from(frame0.format == FrameFormat::Rgba8);
         let level0 = &self.levels[0];
-        let load = bind(device, &p.load_layout, &self.load_uniform, &[&frame0.buffer, &frame1.buffer, &level0.i0, &level0.i1]);
+        let load =
+            bind(device, &p.load_layout, &self.load_uniform, &[&frame0.buffer, &frame1.buffer, &level0.i0, &level0.i1]);
         let output_level = self.plan.output_level();
         let finest = &self.levels[output_level];
         // A full-resolution output level writes `out` in its last dispatch; otherwise the
@@ -374,7 +398,8 @@ impl GpuDis {
             }
         };
 
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("dis"), timestamp_writes: timestamps });
+        let mut pass = encoder
+            .begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("dis"), timestamp_writes: timestamps });
         let per_pixel = |w: u32, h: u32| (w.div_ceil(WG), h.div_ceil(WG));
         pass.set_pipeline(&p.load[format]);
         pass.set_bind_group(0, &load, &[]);
@@ -434,7 +459,8 @@ impl crate::FlowEstimator for GpuDis {
         host.frames[1].write_gray(&ctx, frame1)?;
         let host = self.host.as_ref().expect("allocated above");
         ctx.scoped(|| {
-            let mut encoder = ctx.device().create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("dis") });
+            let mut encoder =
+                ctx.device().create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("dis") });
             self.encode(&mut encoder, &host.frames[0], &host.frames[1], &host.out, None)?;
             ctx.queue().submit([encoder.finish()]);
             host.staging.read(&ctx, &host.out)
@@ -447,23 +473,27 @@ impl Pipelines {
         use Slot::{Read, Write};
         let module = |label: &str, parts: &[&str]| {
             let source: String = std::iter::once(COMMON).chain(parts.iter().copied()).collect::<Vec<_>>().join("\n");
-            device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some(label), source: wgpu::ShaderSource::Wgsl(source.into()) })
-        };
-        let pipeline = |module: &wgpu::ShaderModule, layout: &wgpu::BindGroupLayout, entry: &str, constants: &[(&str, f64)]| {
-            let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some(entry),
-                bind_group_layouts: &[Some(layout)],
-                immediate_size: 0,
-            });
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some(entry),
-                layout: Some(&pl),
-                module,
-                entry_point: Some(entry),
-                compilation_options: wgpu::PipelineCompilationOptions { constants, ..Default::default() },
-                cache: None,
+            device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some(label),
+                source: wgpu::ShaderSource::Wgsl(source.into()),
             })
         };
+        let pipeline =
+            |module: &wgpu::ShaderModule, layout: &wgpu::BindGroupLayout, entry: &str, constants: &[(&str, f64)]| {
+                let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some(entry),
+                    bind_group_layouts: &[Some(layout)],
+                    immediate_size: 0,
+                });
+                device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some(entry),
+                    layout: Some(&pl),
+                    module,
+                    entry_point: Some(entry),
+                    compilation_options: wgpu::PipelineCompilationOptions { constants, ..Default::default() },
+                    cache: None,
+                })
+            };
         let load_layout = layout(device, &[Read, Read, Write, Write]);
         let load_module = module("dis load", &[LOAD]);
         let load = [0.0, 1.0].map(|f| pipeline(&load_module, &load_layout, "load", &[("FORMAT", f)]));
@@ -512,16 +542,22 @@ fn layout(device: &wgpu::Device, slots: &[Slot]) -> wgpu::BindGroupLayout {
         ty: wgpu::BindingType::Buffer { ty, has_dynamic_offset: false, min_binding_size: None },
         count: None,
     };
-    let entries: Vec<_> = std::iter::once(entry(0, wgpu::BufferBindingType::Uniform))
-        .chain(slots.iter().enumerate().map(|(i, s)| {
-            entry(i as u32 + 1, wgpu::BufferBindingType::Storage { read_only: matches!(s, Slot::Read) })
-        }))
-        .collect();
+    let entries: Vec<_> =
+        std::iter::once(entry(0, wgpu::BufferBindingType::Uniform))
+            .chain(slots.iter().enumerate().map(|(i, s)| {
+                entry(i as u32 + 1, wgpu::BufferBindingType::Storage { read_only: matches!(s, Slot::Read) })
+            }))
+            .collect();
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: None, entries: &entries })
 }
 
 /// A bind group with `uniform` at binding 0 and `buffers` at bindings 1, 2, ...
-fn bind(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, uniform: &wgpu::Buffer, buffers: &[&wgpu::Buffer]) -> wgpu::BindGroup {
+fn bind(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    uniform: &wgpu::Buffer,
+    buffers: &[&wgpu::Buffer],
+) -> wgpu::BindGroup {
     let entries: Vec<_> = std::iter::once(uniform)
         .chain(buffers.iter().copied())
         .enumerate()

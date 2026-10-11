@@ -77,7 +77,9 @@ fn input_mismatches(a: &[(String, Report)], b: &[(String, Report)]) -> Vec<Strin
         let bad: Vec<String> = a
             .iter()
             .zip(b)
-            .filter(|((_, ra), (_, rb))| matches!((ra.inputs.get(key), rb.inputs.get(key)), (Some(x), Some(y)) if x != y))
+            .filter(
+                |((_, ra), (_, rb))| matches!((ra.inputs.get(key), rb.inputs.get(key)), (Some(x), Some(y)) if x != y),
+            )
             .map(|((na, _), (nb, _))| format!("{na} vs {nb}"))
             .collect();
         if !bad.is_empty() {
@@ -152,7 +154,8 @@ pub fn compare_reports(
             Level::Runs => a.iter().chain(b).all(|(_, r)| r.metrics.contains_key(m)),
             Level::Samples => a.iter().chain(b).all(|(_, r)| r.samples.contains_key(m)),
         };
-        let mut names: Vec<String> = a[0].1.metrics.keys().chain(a[0].1.samples.keys()).filter(|m| everywhere(m)).cloned().collect();
+        let mut names: Vec<String> =
+            a[0].1.metrics.keys().chain(a[0].1.samples.keys()).filter(|m| everywhere(m)).cloned().collect();
         names.sort();
         names.dedup();
         names
@@ -172,7 +175,12 @@ pub fn compare_reports(
                 }
                 let get = |set: &[(String, Report)]| -> Result<Vec<f64>, Error> {
                     set.iter()
-                        .map(|(name, r)| r.metrics.get(&m).copied().ok_or_else(|| Error::Invalid(format!("'{name}' has no metric '{m}'"))))
+                        .map(|(name, r)| {
+                            r.metrics
+                                .get(&m)
+                                .copied()
+                                .ok_or_else(|| Error::Invalid(format!("'{name}' has no metric '{m}'")))
+                        })
                         .collect()
                 };
                 (get(a)?, get(b)?)
@@ -210,7 +218,9 @@ pub fn compare_reports(
             // then dominated by a few tiny denominators (on a real image it can even have the
             // opposite sign to the difference of means). Keep it for runs only.
             Level::Samples => result.pair_rel = None,
-            Level::Runs if values.0.len() < T_INTERVAL_BELOW => result.add_t_intervals(&values.0, &values.1, cfg.confidence),
+            Level::Runs if values.0.len() < T_INTERVAL_BELOW => {
+                result.add_t_intervals(&values.0, &values.1, cfg.confidence)
+            }
             Level::Runs => {}
         }
         rows.push(Row { metric: m, level, significant: result.significant(), result });
@@ -263,9 +273,14 @@ impl Comparison {
             self.bootstrap.resamples,
             self.bootstrap.seed
         );
-        let _ = writeln!(s, "| metric | level | n | block | A | B | B - A [{pct}% CI] | B / A - 1 [{pct}% CI] | mean of per-unit B / A - 1 | p |");
+        let _ = writeln!(
+            s,
+            "| metric | level | n | block | A | B | B - A [{pct}% CI] | B / A - 1 [{pct}% CI] | mean of per-unit B / A - 1 | p |"
+        );
         s.push_str("|---|---|---:|---:|---:|---:|---|---|---|---:|\n");
-        let t = |iv: Option<[f64; 2]>, fmt: &dyn Fn(f64) -> String| iv.map_or(String::new(), |[lo, hi]| format!(" (t: [{}, {}])", fmt(lo), fmt(hi)));
+        let t = |iv: Option<[f64; 2]>, fmt: &dyn Fn(f64) -> String| {
+            iv.map_or(String::new(), |[lo, hi]| format!(" (t: [{}, {}])", fmt(lo), fmt(hi)))
+        };
         let pct_of = |v: f64| format!("{:+.2}%", 100.0 * v);
         for r in &self.rows {
             let c = &r.result;
@@ -289,7 +304,13 @@ impl Comparison {
                 100.0 * c.rel,
                 100.0 * c.rel_lo,
                 100.0 * c.rel_hi,
-                c.pair_rel.map_or("-".to_string(), |[m, lo, hi]| format!("{} [{}, {}]{}", pct_of(m), pct_of(lo), pct_of(hi), t(c.t_pair_rel, &pct_of))),
+                c.pair_rel.map_or("-".to_string(), |[m, lo, hi]| format!(
+                    "{} [{}, {}]{}",
+                    pct_of(m),
+                    pct_of(lo),
+                    pct_of(hi),
+                    t(c.t_pair_rel, &pct_of)
+                )),
                 if c.p < 0.001 { "< 0.001".to_string() } else { format!("{:.3}", c.p) }
             );
         }
@@ -343,7 +364,9 @@ mod tests {
     fn run_level_pairs_by_position() {
         let a: Vec<(String, Report)> = (0..5).map(|i| (format!("a{i}"), report(100.0 + i as f64, None))).collect();
         let b: Vec<(String, Report)> = (0..5).map(|i| (format!("b{i}"), report(102.0 + i as f64, None))).collect();
-        let c = compare_reports(&a, &b, &["total".into()], None, &BootstrapConfig { resamples: 300, ..Default::default() }).unwrap();
+        let c =
+            compare_reports(&a, &b, &["total".into()], None, &BootstrapConfig { resamples: 300, ..Default::default() })
+                .unwrap();
         assert_eq!(c.rows[0].level, Level::Runs);
         assert_eq!(c.warnings.len(), 2, "5 pairs are few, and get t intervals: {:?}", c.warnings);
         assert_eq!(c.rows[0].result.n, 5);
@@ -390,7 +413,14 @@ mod tests {
         ra.samples("warp5", "pairs/gap5/0-34/flow=f", values(1.0));
         let mut rb = report(1.0, None);
         rb.samples("warp5", "pairs/gap5/0-34/flow=f", values(1.1));
-        let c = compare_reports(&[("a".into(), ra)], &[("b".into(), rb)], &["warp5".into()], None, &BootstrapConfig { resamples: 200, ..Default::default() }).unwrap();
+        let c = compare_reports(
+            &[("a".into(), ra)],
+            &[("b".into(), rb)],
+            &["warp5".into()],
+            None,
+            &BootstrapConfig { resamples: 200, ..Default::default() },
+        )
+        .unwrap();
         assert_eq!(c.rows[0].result.block, Some(5));
         assert!(c.warnings.iter().any(|w| w.contains("moving blocks")));
         assert!(c.to_markdown().contains("| warp5 * | samples | 30 | 5 |"));

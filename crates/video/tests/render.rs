@@ -82,8 +82,10 @@ fn solid(w: usize, h: usize, rgb: [u8; 3]) -> Image {
 fn renders_every_frame_once_and_blends_linearly() {
     let (w, h) = (64, 48);
     let (frames, _) = scene(w, h, 9);
-    let keyframes =
-        vec![Keyframe { frame: 8, style: solid(w, h, [0, 0, 250]) }, Keyframe { frame: 2, style: solid(w, h, [200, 0, 0]) }];
+    let keyframes = vec![
+        Keyframe { frame: 8, style: solid(w, h, [0, 0, 250]) },
+        Keyframe { frame: 2, style: solid(w, h, [200, 0, 0]) },
+    ];
     let shot = Shot { frames: &frames, keyframes, mask: None, range: None };
     let engine = SolidColour::default();
     let device = ComputeDevice::cpu();
@@ -115,10 +117,8 @@ fn renders_every_frame_once_and_blends_linearly() {
 fn cpu_render_follows_the_scene() {
     let (w, h) = (96, 64);
     let (frames, truth) = scene(w, h, 7);
-    let keyframes = vec![
-        Keyframe { frame: 0, style: truth[0].clone() },
-        Keyframe { frame: 6, style: truth[6].clone() },
-    ];
+    let keyframes =
+        vec![Keyframe { frame: 0, style: truth[0].clone() }, Keyframe { frame: 6, style: truth[6].clone() }];
     let shot = Shot { frames: &frames, keyframes, mask: None, range: None };
     let device = ComputeDevice::new(Backend::Cpu).unwrap();
     let sink = MemorySink::new();
@@ -153,7 +153,10 @@ fn painting_at_keyframes_and_masks() {
     let device = ComputeDevice::cpu();
     let sink = MemorySink::new();
     let params = VideoParams { keyframe_output: KeyframeOutput::Painting, gate_mapping: true, ..fast_params() };
-    Renderer::new(&device, params).options(RenderOptions { parallel_chains: Some(1), ..Default::default() }).render(&shot, &sink).unwrap();
+    Renderer::new(&device, params)
+        .options(RenderOptions { parallel_chains: Some(1), ..Default::default() })
+        .render(&shot, &sink)
+        .unwrap();
     let out = sink.into_frames();
     assert_eq!(out.len(), 4);
     let painting: Vec<u8> = truth[1].data().as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect();
@@ -177,7 +180,12 @@ fn rejects_inconsistent_shots() {
 #[test]
 fn cancellation_stops_the_render() {
     let (frames, truth) = scene(48, 32, 12);
-    let shot = Shot { frames: &frames, keyframes: vec![Keyframe { frame: 0, style: truth[0].clone() }], mask: None, range: None };
+    let shot = Shot {
+        frames: &frames,
+        keyframes: vec![Keyframe { frame: 0, style: truth[0].clone() }],
+        mask: None,
+        range: None,
+    };
     let engine = SolidColour::default();
     let device = ComputeDevice::cpu();
     let token = CancelToken::new();
@@ -261,7 +269,8 @@ fn gpu_render_matches_cpu_quality() {
     println!("device: {}", device.name());
     let (w, h) = (96, 64);
     let (frames, truth) = scene(w, h, 7);
-    let keyframes = vec![Keyframe { frame: 0, style: truth[0].clone() }, Keyframe { frame: 6, style: truth[6].clone() }];
+    let keyframes =
+        vec![Keyframe { frame: 0, style: truth[0].clone() }, Keyframe { frame: 6, style: truth[6].clone() }];
     let shot = Shot { frames: &frames, keyframes, mask: None, range: None };
     let run = |device: &ComputeDevice| {
         let sink = MemorySink::new();
@@ -282,7 +291,8 @@ fn concurrent_renders_can_share_a_spill_directory() {
     let spill = scratch("shared-spill");
     let device = ComputeDevice::cpu();
     let run = |c0: [u8; 3], c1: [u8; 3]| {
-        let keyframes = vec![Keyframe { frame: 0, style: solid(w, h, c0) }, Keyframe { frame: n - 1, style: solid(w, h, c1) }];
+        let keyframes =
+            vec![Keyframe { frame: 0, style: solid(w, h, c0) }, Keyframe { frame: n - 1, style: solid(w, h, c1) }];
         let shot = Shot { frames: &video, keyframes, mask: None, range: None };
         let options = RenderOptions {
             frame_cache_bytes: w * h * 4,
@@ -292,11 +302,15 @@ fn concurrent_renders_can_share_a_spill_directory() {
         };
         let params = VideoParams { flow: DisParams::preset(FlowPreset::UltraFast), ..VideoParams::classic() };
         let sink = MemorySink::new();
-        let stats = Renderer::with_engines(&SolidColour::default(), &device, params).options(options).render(&shot, &sink).unwrap();
+        let stats = Renderer::with_engines(&SolidColour::default(), &device, params)
+            .options(options)
+            .render(&shot, &sink)
+            .unwrap();
         assert!(stats.frame_cache.spilled > 0 && stats.buffers.spilled > 0, "{stats:?}");
         for (t, img) in sink.into_frames() {
             let a = t as f32 / (n - 1) as f32;
-            let expect: Vec<u8> = (0..3).map(|c| (f32::from(c0[c]) * (1.0 - a) + f32::from(c1[c]) * a).round() as u8).collect();
+            let expect: Vec<u8> =
+                (0..3).map(|c| (f32::from(c0[c]) * (1.0 - a) + f32::from(c1[c]) * a).round() as u8).collect();
             assert_eq!(img.pixel(1, 1), &expect[..], "frame {t}");
         }
     };
@@ -322,7 +336,9 @@ fn default_parallelism_is_bounded_for_many_keyframes() {
     let keyframes = (0..n).step_by(3).map(|k| Keyframe { frame: k, style: solid(w, h, [k as u8, 0, 0]) }).collect();
     let shot = Shot { frames: &frames, keyframes, mask: None, range: None };
     let device = ComputeDevice::cpu();
-    let stats = Renderer::with_engines(&SolidColour::default(), &device, fast_params()).render(&shot, &MemorySink::new()).unwrap();
+    let stats = Renderer::with_engines(&SolidColour::default(), &device, fast_params())
+        .render(&shot, &MemorySink::new())
+        .unwrap();
     assert_eq!(stats.chains, 16);
     assert!(stats.parallel >= 1 && stats.parallel <= MAX_DEFAULT_PARALLEL, "{stats:?}");
     assert_eq!(stats.parallel, stats.resources.parallel);
@@ -337,7 +353,9 @@ fn default_parallelism_is_bounded_for_many_keyframes() {
 
 /// Runs `render` on another thread and fails the test if it does not return within a minute
 /// (a hang is the failure these tests guard against).
-fn returns_in_time(render: impl FnOnce() -> Result<RenderStats, VideoError> + Send + 'static) -> Result<RenderStats, VideoError> {
+fn returns_in_time(
+    render: impl FnOnce() -> Result<RenderStats, VideoError> + Send + 'static,
+) -> Result<RenderStats, VideoError> {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let _ = tx.send(render());
@@ -374,7 +392,13 @@ impl Synthesizer for PanickingEngine {
 fn long_shot() -> (MemoryFrames, Vec<Keyframe>) {
     let (w, h, n) = (48, 32, 40);
     let (frames, _) = scene(w, h, n);
-    (frames, vec![Keyframe { frame: 0, style: solid(w, h, [9, 9, 9]) }, Keyframe { frame: n - 1, style: solid(w, h, [90, 9, 9]) }])
+    (
+        frames,
+        vec![
+            Keyframe { frame: 0, style: solid(w, h, [9, 9, 9]) },
+            Keyframe { frame: n - 1, style: solid(w, h, [90, 9, 9]) },
+        ],
+    )
 }
 
 #[test]
@@ -382,10 +406,13 @@ fn a_panicking_sink_fails_the_render_instead_of_hanging() {
     let result = returns_in_time(|| {
         let (frames, keyframes) = long_shot();
         let shot = Shot { frames: &frames, keyframes, mask: None, range: None };
-        Renderer::with_engines(&SolidColour::default(), &ComputeDevice::cpu(), fast_params()).render(&shot, &PanickingSink)
+        Renderer::with_engines(&SolidColour::default(), &ComputeDevice::cpu(), fast_params())
+            .render(&shot, &PanickingSink)
     });
     match result {
-        Err(VideoError::Panicked(msg)) => assert!(msg.contains("frame sink") && msg.contains("cannot store frame"), "{msg}"),
+        Err(VideoError::Panicked(msg)) => {
+            assert!(msg.contains("frame sink") && msg.contains("cannot store frame"), "{msg}")
+        }
         other => panic!("expected a panic error, got {other:?}"),
     }
 }
@@ -409,7 +436,8 @@ fn a_panicking_progress_callback_or_engine_fails_the_render() {
     let result = returns_in_time(|| {
         let (frames, keyframes) = long_shot();
         let shot = Shot { frames: &frames, keyframes, mask: None, range: None };
-        Renderer::with_engines(&PanickingEngine::default(), &ComputeDevice::cpu(), fast_params()).render(&shot, &MemorySink::new())
+        Renderer::with_engines(&PanickingEngine::default(), &ComputeDevice::cpu(), fast_params())
+            .render(&shot, &MemorySink::new())
     });
     assert!(matches!(&result, Err(VideoError::Panicked(m)) if m.contains("engine failure")), "{result:?}");
 }

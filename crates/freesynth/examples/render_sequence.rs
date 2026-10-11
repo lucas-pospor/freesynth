@@ -95,7 +95,9 @@ fn main() -> ExitCode {
         }
         let mut value = || it.next().cloned();
         let ok = match arg.as_str() {
-            "--project" => value().and_then(|p| Project::load(&p).map_err(|e| eprintln!("{e}")).ok()).map(|p| project = p),
+            "--project" => {
+                value().and_then(|p| Project::load(&p).map_err(|e| eprintln!("{e}")).ok()).map(|p| project = p)
+            }
             "--frames" => value().map(|v| project.media.frames = v),
             "--out" => value().map(|v| project.output.frames = v),
             "--mask" => value().map(|v| project.media.mask = Some(v)),
@@ -106,8 +108,12 @@ fn main() -> ExitCode {
             }),
             "--first" => value().and_then(|v| v.parse().ok()).map(|n| project.media.first = Some(n)),
             "--last" => value().and_then(|v| v.parse().ok()).map(|n| project.media.last = Some(n)),
-            "--backend" => value().and_then(|v| v.parse().map_err(|e| eprintln!("{e}")).ok()).map(|b| project.engine.backend = b),
-            "--preset" => value().and_then(|v| v.parse().map_err(|e| eprintln!("{e}")).ok()).map(|p| project.engine.preset = p),
+            "--backend" => {
+                value().and_then(|v| v.parse().map_err(|e| eprintln!("{e}")).ok()).map(|b| project.engine.backend = b)
+            }
+            "--preset" => {
+                value().and_then(|v| v.parse().map_err(|e| eprintln!("{e}")).ok()).map(|p| project.engine.preset = p)
+            }
             "--seed" => value().and_then(|v| v.parse().ok()).map(|n| project.engine.seed = n),
             "--mapping" => value().and_then(|v| v.parse().ok()).map(|w| project.guides.mapping = w),
             "--temporal" => value().and_then(|v| v.parse().ok()).map(|w| project.guides.temporal = w),
@@ -118,7 +124,9 @@ fn main() -> ExitCode {
             }
             "--parallel" => value().and_then(|v| v.parse().ok()).map(|n| options.parallel_chains = Some(n)),
             "--memory-mb" => value().and_then(|v| v.parse::<usize>().ok()).map(|n| options.memory_budget = n << 20),
-            "--frame-cache-mb" => value().and_then(|v| v.parse::<usize>().ok()).map(|n| options.frame_cache_bytes = n << 20),
+            "--frame-cache-mb" => {
+                value().and_then(|v| v.parse::<usize>().ok()).map(|n| options.frame_cache_bytes = n << 20)
+            }
             "--buffer-mb" => value().and_then(|v| v.parse::<usize>().ok()).map(|n| options.buffer_bytes = n << 20),
             "--cache-dir" => value().map(|v| options.cache_dir = Some(v.into())),
             "--flow-on-device" => {

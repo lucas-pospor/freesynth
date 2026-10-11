@@ -73,7 +73,9 @@ impl GpuContext {
 
     /// Description of the adapter, when this context opened it.
     pub fn adapter_name(&self) -> Option<String> {
-        self.adapter.as_ref().map(|i| format!("{} ({:?}, {:?}, driver {})", i.name, i.device_type, i.backend, i.driver_info))
+        self.adapter
+            .as_ref()
+            .map(|i| format!("{} ({:?}, {:?}, driver {})", i.name, i.device_type, i.backend, i.driver_info))
     }
 
     /// True when the device can write timestamps at compute pass boundaries.
@@ -134,7 +136,12 @@ impl GpuFrame {
 
     /// Uses an existing buffer, which must have `STORAGE` usage and hold at least
     /// `width * height` 4-byte pixels.
-    pub fn from_buffer(buffer: wgpu::Buffer, width: usize, height: usize, format: FrameFormat) -> Result<Self, FlowError> {
+    pub fn from_buffer(
+        buffer: wgpu::Buffer,
+        width: usize,
+        height: usize,
+        format: FrameFormat,
+    ) -> Result<Self, FlowError> {
         if !buffer.usage().contains(wgpu::BufferUsages::STORAGE) {
             return invalid("frame buffers need STORAGE usage");
         }
@@ -255,7 +262,8 @@ impl Staging {
         if bytes > self.buffer.size() {
             return invalid("staging buffer is too small");
         }
-        let mut encoder = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("flow readback") });
+        let mut encoder =
+            ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("flow readback") });
         if bytes > 0 {
             encoder.copy_buffer_to_buffer(&flow.buffer, 0, &self.buffer, 0, bytes);
         }
