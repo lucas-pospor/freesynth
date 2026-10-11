@@ -1,0 +1,9 @@
+[package]
+name = "freesynth-video"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+freesynth-core = { version = "0.1.0", path = "../core" }
+freesynth-flow = { version = "0.1.0", path = "../flow" }
