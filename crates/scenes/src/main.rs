@@ -5,7 +5,7 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use freesynth_scenes::output::{flow_path, frame_path, occlusion_path, truth_path};
-use freesynth_scenes::{Direction, Flow, Manifest, SceneInfo, SceneParams, StyleFamily, Tier, write_scene};
+use freesynth_scenes::{Direction, FlowField, Manifest, SceneInfo, SceneParams, StyleFamily, Tier, write_scene};
 use image::RgbImage;
 
 const USAGE: &str = "\
@@ -164,7 +164,7 @@ fn load_rgb(path: &Path) -> Result<RgbImage, String> {
 
 /// Mean absolute error (8-bit levels, averaged over channels) between `a` and `b` warped back
 /// with `flow`, over the pixels where `mask` is 0 (or all pixels without a mask).
-fn warp_error(a: &RgbImage, b: &RgbImage, flow: &Flow, mask: Option<&image::GrayImage>) -> (f64, usize) {
+fn warp_error(a: &RgbImage, b: &RgbImage, flow: &FlowField, mask: Option<&image::GrayImage>) -> (f64, usize) {
     let (mut sum, mut count) = (0.0, 0usize);
     for y in 0..a.height() {
         for x in 0..a.width() {
@@ -210,7 +210,7 @@ fn check(args: &[String]) -> Result<(), String> {
                     Direction::Forward => (first, first + gap),
                     Direction::Backward => (first + gap, first),
                 };
-                let flow = Flow::load(flow_path(dir, direction, gap, first)).map_err(|e| e.to_string())?;
+                let flow = FlowField::load(flow_path(dir, direction, gap, first)).map_err(|e| e.to_string())?;
                 let mask = if info.occlusion_masks {
                     let p = occlusion_path(dir, direction, gap, first);
                     Some(image::open(&p).map_err(|e| format!("{}: {e}", p.display()))?.to_luma8())

@@ -1,7 +1,38 @@
 [package]
 name = "freesynth-flow"
+description = "Dense optical flow (DIS) on the GPU and the CPU, position fields, and Middlebury .flo files, for FreeSynth"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = ["gpu"]
+# The wgpu backend. Without it the crate depends only on rayon (flow fields, .flo files, the CPU
+# estimator, position fields), which keeps tools that only read and write flow light.
+gpu = ["dep:bytemuck", "dep:pollster", "dep:wgpu"]
+
 [dependencies]
+rayon = { version = "1.12.0", default-features = false }
+bytemuck = { version = "1.25.2", features = ["derive"], optional = true }
+pollster = { version = "1.0.1", optional = true }
+wgpu = { version = "30.0.1", optional = true }
+
+[dev-dependencies]
+freesynth-scenes = { version = "0.1.0", path = "../scenes" }
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
+
+[[test]]
+name = "gpu_dis"
+required-features = ["gpu"]
+
+[[example]]
+name = "dis_eval"
+required-features = ["gpu"]
+
+[[example]]
+name = "dis_bench"
+required-features = ["gpu"]
+
+[[example]]
+name = "track_eval"
+required-features = ["gpu"]

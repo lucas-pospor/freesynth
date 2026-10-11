@@ -1,11 +1,11 @@
 //! Scene parameters, frame rendering and exact optical flow.
 
+use freesynth_flow::FlowField;
 use image::{GrayImage, RgbImage};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::error::Error;
-use crate::flo::Flow;
 use crate::geometry::World;
 use crate::rng::Rng;
 use crate::style::{Look, Style, StyleFamily};
@@ -145,7 +145,7 @@ pub struct Frame {
 #[derive(Clone, Debug)]
 pub struct ExactFlow {
     /// Displacement of the surface point seen at each pixel centre of the first frame.
-    pub flow: Flow,
+    pub flow: FlowField,
     /// 255 where the flow cannot be used to warp, 0 elsewhere. A pixel is marked when its
     /// surface point is hidden in the second frame or leaves it, or when the pixel or the
     /// pixels around its destination are anti-aliased mixes of two surfaces (their colour
@@ -230,7 +230,7 @@ impl Scene {
     pub fn flow(&self, from: usize, to: usize, from_layers: &LayerMap, to_layers: &LayerMap) -> ExactFlow {
         let (w, h) = (self.params.width, self.params.height);
         let (s0, s1) = (self.world.at(from as f64), self.world.at(to as f64));
-        let mut flow = Flow::new(w, h);
+        let mut flow = FlowField::new(w, h);
         let mut occlusion = vec![0u8; w * h];
         flow.data_mut().par_chunks_mut(w).zip(occlusion.par_chunks_mut(w)).enumerate().for_each(
             |(y, (flow_row, occ_row))| {

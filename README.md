@@ -57,3 +57,11 @@ Creative Commons clips together with their attribution.
 cargo run --release -p freesynth-scenes -- corpus corpus/manifest.toml corpus/generated --tier ci
 cargo test -p freesynth-eval --test ci_quick
 ```
+
+## Optical flow
+
+`freesynth-flow` computes dense optical flow with DIS (Kroeger et al., 2016) on the GPU through
+wgpu or on the CPU, with matching results on both. At 960x540 a flow takes about 0.9 ms of GPU time
+on a Radeon RX 9060 XT and about 9 ms on 12 CPU threads. The crate also builds position fields: it
+tracks pixels from a keyframe by chaining flow with periodic re-anchoring, and keeps a per-pixel
+confidence map from forward-backward consistency.

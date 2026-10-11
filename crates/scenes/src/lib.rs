@@ -45,7 +45,6 @@
 //! interpolation error. See [`output`] for the directory layout.
 
 mod error;
-pub mod flo;
 mod geometry;
 pub mod manifest;
 mod noise;
@@ -56,7 +55,7 @@ mod strokes;
 mod style;
 
 pub use crate::error::Error;
-pub use crate::flo::Flow;
+pub use freesynth_flow::FlowField;
 pub use crate::manifest::{Manifest, ManifestScene, Tier};
 pub use crate::output::{Direction, SceneInfo, write_scene};
 pub use crate::scene::{ExactFlow, Frame, LayerMap, Scene, SceneParams};

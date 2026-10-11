@@ -256,6 +256,7 @@ name = "freesynth-eval"
 version = "0.1.0"
 dependencies = [
  "freesynth-core",
+ "freesynth-flow",
  "freesynth-scenes",
  "rayon",
  "serde",
@@ -265,6 +266,14 @@ dependencies = [
 [[package]]
 name = "freesynth-flow"
 version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "freesynth-scenes",
+ "image",
+ "pollster",
+ "rayon",
+ "wgpu",
+]
 
 [[package]]
 name = "freesynth-gpu"
@@ -283,6 +292,7 @@ dependencies = [
 name = "freesynth-scenes"
 version = "0.1.0"
 dependencies = [
+ "freesynth-flow",
  "image",
  "libm",
  "rayon",

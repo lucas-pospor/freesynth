@@ -228,7 +228,7 @@ fn chain(steps: &[(FlowField, Vec<bool>)]) -> (FlowField, Vec<bool>) {
         })
         .collect();
     let (flow, mask) = pairs.into_iter().unzip();
-    (FlowField::from_raw(w, h, flow), mask)
+    (FlowField::from_vec(w, h, flow), mask)
 }
 
 /// Masked mean of `|a - b|^2` (summed over RGB); `None` if the mask is empty.

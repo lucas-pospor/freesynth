@@ -15,8 +15,8 @@
 //!
 //! Both flow directions are indexed by the first frame of the pair, so `flow_fw/00007.flo` and
 //! `flow_bw/00007.flo` are the two directions between frames 7 and 8. Flow files use the
-//! Middlebury format ([`crate::flo`]). A forward occlusion mask is defined on the pixels of
-//! the earlier frame, a backward one on the pixels of the later frame.
+//! Middlebury format ([`freesynth_flow::flo`]). A forward occlusion mask is defined on the
+//! pixels of the earlier frame, a backward one on the pixels of the later frame.
 
 use std::collections::VecDeque;
 use std::fs;

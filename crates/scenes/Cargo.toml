@@ -10,6 +10,7 @@ name = "freesynth-scenes"
 path = "src/main.rs"
 
 [dependencies]
+freesynth-flow = { version = "0.1.0", path = "../flow", default-features = false }
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 libm = "0.2.16"
 rayon = { version = "1.12.0", default-features = false }

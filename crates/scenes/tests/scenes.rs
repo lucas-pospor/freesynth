@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use freesynth_scenes::output::{flow_path, frame_path, key_path, occlusion_path};
 use freesynth_scenes::{
-    Direction, Flow, Frame, Manifest, Scene, SceneInfo, SceneParams, StyleFamily, Tier, write_scene,
+    Direction, FlowField, Frame, Manifest, Scene, SceneInfo, SceneParams, StyleFamily, Tier, write_scene,
 };
 use image::RgbImage;
 
@@ -51,7 +51,7 @@ fn bilinear(img: &RgbImage, x: f64, y: f64) -> [f64; 3] {
 
 /// Per-pixel errors (mean over channels, 8-bit levels) of `a` against `b` warped back with
 /// `flow`, on the pixels not marked in `occlusion`.
-fn warp_errors(a: &RgbImage, b: &RgbImage, flow: &Flow, occlusion: &image::GrayImage) -> Vec<f64> {
+fn warp_errors(a: &RgbImage, b: &RgbImage, flow: &FlowField, occlusion: &image::GrayImage) -> Vec<f64> {
     let mut errs = Vec::new();
     for y in 0..a.height() {
         for x in 0..a.width() {
@@ -190,7 +190,7 @@ fn flo_files_match_the_format_and_the_flow() {
         let u = f32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
         let v = f32::from_le_bytes(bytes[at + 4..at + 8].try_into().unwrap());
         assert_eq!([u, v], expected.flow.get(x, y));
-        assert_eq!(Flow::load(flow_path(&dir, direction, 1, 0)).unwrap(), expected.flow);
+        assert_eq!(FlowField::load(flow_path(&dir, direction, 1, 0)).unwrap(), expected.flow);
         let mask = image::open(occlusion_path(&dir, direction, 1, 0)).unwrap().to_luma8();
         assert_eq!(mask, expected.occlusion);
     }
