@@ -1,0 +1,20 @@
+[package]
+name = "freesynth"
+description = "FreeSynth library: projects, render sessions, progress and cancellation for keyframe video stylization"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["gpu"]
+# Render on the GPU (wgpu). Without it every render runs on the CPU.
+gpu = ["freesynth-video/gpu"]
+
+[dependencies]
+freesynth-core = { version = "0.1.0", path = "../core" }
+freesynth-video = { version = "0.1.0", path = "../video", default-features = false }
+serde = { version = "1.0.228", features = ["derive"] }
+toml = "1.1.6"
+
+[dev-dependencies]
+freesynth-scenes = { version = "0.1.0", path = "../scenes" }

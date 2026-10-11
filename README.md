@@ -33,7 +33,9 @@ a little quality for more speed, `-preset high` runs the full 2019 schedule with
 and `-compat` reproduces the 2019 tool. Options given explicitly override the preset.
 
 Other options: `-preset`, `-compat`, `-vote plain|weighted`, `-stopmask on|off`,
-`-modulation <map.png>` (per-pixel weight map for the preceding `-guide`), `-seed <n>`,
+`-search improved|compat` (GPU PatchMatch variant: checkerboard propagation in every preset except
+compat, or the 2019 CUDA search), `-modulation <map.png>` (per-pixel weight map for the preceding
+`-guide`), `-seed <n>`,
 `-threads <n>`, `-bands <n>`, `-deterministic` (same output for a given seed and band count),
 `-bitexact` (with `-threads 1`, reproduces the 2019 CPU build's arithmetic; implies `-compat`),
 `-dumpnnf <file>` and `-dumperror <file.pfm>`.
@@ -65,3 +67,16 @@ wgpu or on the CPU, with matching results on both. At 960x540 a flow takes about
 on a Radeon RX 9060 XT and about 9 ms on 12 CPU threads. The crate also builds position fields: it
 tracks pixels from a keyframe by chaining flow with periodic re-anchoring, and keeps a per-pixel
 confidence map from forward-backward consistency.
+
+## Video
+
+`freesynth-video` stylizes a shot from one or more painted keyframes. Each keyframe is propagated
+forward and backward up to its neighbouring keyframes. The guides come from the input frames, from
+position fields built with `freesynth-flow`, and from the previous output frame, and the two passes
+of each interval are blended. Chains run in parallel on one GPU device, and frames beyond a memory
+budget spill to disk. The `freesynth` crate wraps this in projects and render sessions with
+progress reporting and cancellation. To render an image sequence:
+
+```bash
+cargo run --release -p freesynth --example render_sequence -- --help
+```

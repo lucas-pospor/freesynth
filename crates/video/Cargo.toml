@@ -1,9 +1,22 @@
 [package]
 name = "freesynth-video"
+description = "Keyframe video stylization for FreeSynth: guides, keyframe chains, blending, frame caches"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = ["gpu"]
+# Synthesis and optical flow on one shared wgpu device. Without it everything runs on the CPU.
+gpu = ["dep:freesynth-gpu", "dep:pollster", "dep:wgpu", "freesynth-flow/gpu"]
+
 [dependencies]
 freesynth-core = { version = "0.1.0", path = "../core" }
-freesynth-flow = { version = "0.1.0", path = "../flow" }
+freesynth-flow = { version = "0.1.0", path = "../flow", default-features = false }
+freesynth-gpu = { version = "0.1.0", path = "../gpu", optional = true }
+pollster = { version = "1.0.1", optional = true }
+rayon = { version = "1.12.0", default-features = false }
+wgpu = { version = "30.0.1", optional = true }
+
+[dev-dependencies]
+freesynth-scenes = { version = "0.1.0", path = "../scenes" }
