@@ -21,7 +21,19 @@
 //! - The per-pixel random generator is a 32-bit PCG seeded from [`Params::seed`].
 //!
 //! [`Params::num_threads`], [`Params::num_bands`], [`Params::omega_sync`] and
-//! [`Params::bit_exact`] only affect the CPU engine.
+//! [`Params::bit_exact`] only affect the CPU engine (`bit_exact` changes how the CPU sums patch
+//! errors and nothing else; vote rounding comes from the preset or
+//! [`Params::vote_rounding`]). Presets resolve with
+//! [`Engine::Gpu`](freesynth_core::Engine::Gpu) (see [`Params::schedule`]), which differs from the
+//! CPU only in [`Preset::Fast`](freesynth_core::Preset::Fast).
+//!
+//! # Sharing a device
+//!
+//! [`GpuContext::new`] opens its own device. To run on a device that other GPU work also uses
+//! (an optical-flow engine, a GUI), create it with [`GpuContext::required_limits`] (or
+//! [`GpuContext::required_limits_from`] to keep other raised limits) and wrap it with
+//! [`GpuContext::from_device`]. Work is submitted in command buffers of bounded size, so a
+//! long synthesis does not trip driver timeouts and leaves gaps for other work on the queue.
 //!
 //! ```no_run
 //! use freesynth_core::{io, GuideLayer, Params, SynthesisInput};
@@ -38,12 +50,19 @@
 mod engine;
 mod error;
 
+use std::sync::Mutex;
+
 use freesynth_core::{Params, SynthesisInput, SynthesisOutput};
 
 pub use crate::error::GpuError;
 
-/// Number of storage buffers the synthesis kernels bind at once.
-const REQUIRED_STORAGE_BUFFERS: u32 = 12;
+/// Number of storage buffers the synthesis kernels bind at once. wgpu's default limit is 8.
+pub const REQUIRED_STORAGE_BUFFERS: u32 = 12;
+
+/// Invocations per workgroup of the largest kernel (16 x 16, the resampling kernel).
+const REQUIRED_INVOCATIONS: u32 = 256;
+/// Workgroup edge length of the largest kernel.
+const REQUIRED_WORKGROUP_SIZE: u32 = 16;
 
 fn instance() -> wgpu::Instance {
     wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env())
@@ -62,11 +81,34 @@ fn describe(i: &wgpu::AdapterInfo) -> String {
 }
 
 /// A GPU device ready to run syntheses. Creating one takes some time (adapter and device
-/// initialisation), so reuse it for several syntheses.
+/// initialisation), so reuse it for several syntheses; it also keeps the compiled shader
+/// pipelines, so only the first synthesis with a given channel layout and patch size compiles
+/// them.
 pub struct GpuContext {
     device: wgpu::Device,
     queue: wgpu::Queue,
     info: wgpu::AdapterInfo,
+    /// Estimated work per command buffer (see `engine::Submitter`).
+    submission_budget: u64,
+    /// Pipelines compiled by earlier syntheses.
+    pipelines: Mutex<engine::PipelineCache>,
+}
+
+/// Checks that `limits` (of a device) allow the synthesis kernels to run. Returns every shortfall
+/// in one message.
+fn check_limits(limits: &wgpu::Limits) -> Result<(), String> {
+    let checks = [
+        ("max_storage_buffers_per_shader_stage", limits.max_storage_buffers_per_shader_stage, REQUIRED_STORAGE_BUFFERS),
+        ("max_compute_invocations_per_workgroup", limits.max_compute_invocations_per_workgroup, REQUIRED_INVOCATIONS),
+        ("max_compute_workgroup_size_x", limits.max_compute_workgroup_size_x, REQUIRED_WORKGROUP_SIZE),
+        ("max_compute_workgroup_size_y", limits.max_compute_workgroup_size_y, REQUIRED_WORKGROUP_SIZE),
+        ("max_compute_workgroups_per_dimension", limits.max_compute_workgroups_per_dimension, 1),
+        ("max_bind_groups", limits.max_bind_groups, 1),
+        ("max_dynamic_uniform_buffers_per_pipeline_layout", limits.max_dynamic_uniform_buffers_per_pipeline_layout, 1),
+    ];
+    let missing: Vec<String> =
+        checks.iter().filter(|(_, have, need)| have < need).map(|(name, have, need)| format!("{name} is {have}, needs {need}")).collect();
+    if missing.is_empty() { Ok(()) } else { Err(missing.join("; ")) }
 }
 
 impl GpuContext {
@@ -80,30 +122,103 @@ impl GpuContext {
         .map_err(|_| GpuError::NoAdapter)?;
         let info = adapter.get_info();
         let available = adapter.limits();
-        if available.max_storage_buffers_per_shader_stage < REQUIRED_STORAGE_BUFFERS {
-            return Err(GpuError::Device(format!(
-                "adapter '{}' supports only {} storage buffers per shader stage, {} are needed",
-                info.name, available.max_storage_buffers_per_shader_stage, REQUIRED_STORAGE_BUFFERS
-            )));
-        }
-        // Default limits, raised where the kernels need more: storage buffer count, the largest
-        // buffers the adapter allows (for large images) and all of its workgroup memory (for the
-        // target tile cache).
-        let required_limits = wgpu::Limits {
-            max_storage_buffers_per_shader_stage: REQUIRED_STORAGE_BUFFERS,
-            max_storage_buffer_binding_size: available.max_storage_buffer_binding_size,
-            max_buffer_size: available.max_buffer_size,
-            max_compute_workgroup_storage_size: available.max_compute_workgroup_storage_size,
-            ..wgpu::Limits::default()
-        };
+        check_limits(&available).map_err(|m| GpuError::Device(format!("adapter '{}' is too limited: {m}", info.name)))?;
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("freesynth"),
-            required_limits,
+            required_limits: Self::required_limits(&available),
             memory_hints: wgpu::MemoryHints::Performance,
             ..Default::default()
         }))
         .map_err(|e| GpuError::Device(e.to_string()))?;
-        Ok(Self { device, queue, info })
+        Ok(Self::wrap(device, queue, info))
+    }
+
+    fn wrap(device: wgpu::Device, queue: wgpu::Queue, info: wgpu::AdapterInfo) -> Self {
+        Self {
+            device,
+            queue,
+            info,
+            submission_budget: engine::DEFAULT_SUBMISSION_BUDGET,
+            pipelines: Mutex::new(engine::PipelineCache::default()),
+        }
+    }
+
+    /// The device limits to request for a device the engine will use, given the adapter's limits
+    /// (`adapter.limits()`). Pass them, or larger ones, as `required_limits` when creating a
+    /// device for [`from_device`](Self::from_device).
+    ///
+    /// These are wgpu's defaults raised where the engine needs more; see
+    /// [`required_limits_from`](Self::required_limits_from) to raise other base limits instead.
+    pub fn required_limits(adapter_limits: &wgpu::Limits) -> wgpu::Limits {
+        Self::required_limits_from(&wgpu::Limits::default(), adapter_limits)
+    }
+
+    /// `base` with every limit the engine depends on raised to what it needs, given the adapter's
+    /// limits (`adapter.limits()`). Use it when the device also serves other work with its own
+    /// limits (a GUI that needs larger textures), or to start from
+    /// `wgpu::Limits::downlevel_defaults()` on adapters that do not reach wgpu's defaults. Each
+    /// raised field is the larger of `base` and the engine's need; all others are `base`'s.
+    ///
+    /// Raised fields:
+    /// - `max_storage_buffers_per_shader_stage`: [`REQUIRED_STORAGE_BUFFERS`] (the default is 8,
+    ///   too few for the kernels).
+    /// - `max_compute_invocations_per_workgroup` (256), `max_compute_workgroup_size_x` and `_y`
+    ///   (16), `max_bind_groups` and `max_dynamic_uniform_buffers_per_pipeline_layout` (1): the
+    ///   kernels' fixed needs, all within wgpu's defaults.
+    /// - `max_storage_buffer_binding_size` and `max_buffer_size`: the adapter's maximum. The
+    ///   defaults (128 and 256 MiB) cap the image size: each buffer holds one image level, and
+    ///   a larger image fails with [`GpuError::TooLarge`].
+    /// - `max_compute_workgroup_storage_size`: the adapter's maximum. Kernels cache target
+    ///   patches in workgroup memory when it fits and read global memory otherwise, so less
+    ///   only costs speed.
+    pub fn required_limits_from(base: &wgpu::Limits, adapter_limits: &wgpu::Limits) -> wgpu::Limits {
+        wgpu::Limits {
+            max_storage_buffers_per_shader_stage: base.max_storage_buffers_per_shader_stage.max(REQUIRED_STORAGE_BUFFERS),
+            max_compute_invocations_per_workgroup: base.max_compute_invocations_per_workgroup.max(REQUIRED_INVOCATIONS),
+            max_compute_workgroup_size_x: base.max_compute_workgroup_size_x.max(REQUIRED_WORKGROUP_SIZE),
+            max_compute_workgroup_size_y: base.max_compute_workgroup_size_y.max(REQUIRED_WORKGROUP_SIZE),
+            max_compute_workgroups_per_dimension: base.max_compute_workgroups_per_dimension.max(1),
+            max_bind_groups: base.max_bind_groups.max(1),
+            max_dynamic_uniform_buffers_per_pipeline_layout: base.max_dynamic_uniform_buffers_per_pipeline_layout.max(1),
+            max_storage_buffer_binding_size: base
+                .max_storage_buffer_binding_size
+                .max(adapter_limits.max_storage_buffer_binding_size),
+            max_buffer_size: base.max_buffer_size.max(adapter_limits.max_buffer_size),
+            max_compute_workgroup_storage_size: base
+                .max_compute_workgroup_storage_size
+                .max(adapter_limits.max_compute_workgroup_storage_size),
+            ..base.clone()
+        }
+    }
+
+    /// Uses a device and queue created elsewhere, so that the engine can share one device with
+    /// other GPU work. Request the device with [`required_limits`](Self::required_limits).
+    ///
+    /// Fails with [`GpuError::Device`] if the device's limits are below what the kernels need
+    /// (most often `max_storage_buffers_per_shader_stage` left at the default of 8). Buffer size
+    /// limits are checked per synthesis, against the image size.
+    ///
+    /// Each synthesis pushes and pops its own error scopes and submits its own command buffers;
+    /// it never waits for work other than its own readback, but the final readback polls the
+    /// device, which also completes other users' callbacks.
+    pub fn from_device(device: wgpu::Device, queue: wgpu::Queue) -> Result<Self, GpuError> {
+        let info = device.adapter_info();
+        check_limits(&device.limits()).map_err(|m| {
+            GpuError::Device(format!(
+                "the device lacks limits the engine needs ({m}); create it with GpuContext::required_limits"
+            ))
+        })?;
+        Ok(Self::wrap(device, queue, info))
+    }
+
+    /// The device this context runs on.
+    pub fn device(&self) -> &wgpu::Device {
+        &self.device
+    }
+
+    /// The queue this context submits to.
+    pub fn queue(&self) -> &wgpu::Queue {
+        &self.queue
     }
 
     /// Description of the adapter in use.
@@ -113,7 +228,7 @@ impl GpuContext {
 
     /// Runs example-based synthesis on the GPU (`ebsynthRun` with the CUDA backend).
     pub fn synthesize(&self, input: &SynthesisInput, params: &Params) -> Result<SynthesisOutput, GpuError> {
-        engine::synthesize(self, input, params)
+        engine::synthesize(self, input, params).map(|(out, _)| out)
     }
 }
 
@@ -124,7 +239,10 @@ pub fn synthesize(input: &SynthesisInput, params: &Params) -> Result<SynthesisOu
 
 #[cfg(test)]
 mod tests {
-    use freesynth_core::{Image, Params, SynthesisInput, VoteMode};
+    use freesynth_core::{
+        GlibcRand, Image, Params, PerLevel, Preset, SynthesisInput, VoteMode, VoteRounding, nnf_init_random,
+        nnf_patch_errors, vote_plain,
+    };
 
     use super::*;
 
@@ -199,14 +317,18 @@ mod tests {
         let Some(ctx) = context() else { return };
         let img = test_image(64, 64, 0.0);
         let mut input = identity_input(&img);
-        let params = Params {
-            vote_mode: VoteMode::Weighted,
-            use_stop_threshold: true,
-            extra_pass_3x3: true,
-            ..Params::default()
-        };
-        let out = ctx.synthesize(&input, &params).unwrap();
-        assert!(psnr(&out.image, &img) > 35.0);
+        for preset in Preset::ALL {
+            let params = Params {
+                vote_mode: Some(VoteMode::Weighted),
+                use_stop_threshold: Some(true),
+                extra_pass_3x3: true,
+                ..Params::with_preset(preset)
+            };
+            let out = ctx.synthesize(&input, &params).unwrap();
+            assert!(psnr(&out.image, &img) > 35.0, "{preset}");
+            let out = ctx.synthesize(&input, &Params::with_preset(preset)).unwrap();
+            assert!(psnr(&out.image, &img) > 35.0, "{preset}");
+        }
 
         input.target_modulation = Some(Image::from_raw(64, 64, 3, vec![255; 64 * 64 * 3]));
         let out = ctx.synthesize(&input, &Params::default()).unwrap();
@@ -248,7 +370,7 @@ mod tests {
             guide_weights: vec![1.0 / 3.0; 3],
         };
         for vote_mode in [VoteMode::Plain, VoteMode::Weighted] {
-            let params = Params { vote_mode, ..Params::default() };
+            let params = Params { vote_mode: Some(vote_mode), ..Params::default() };
             let gpu = ctx.synthesize(&input, &params).unwrap();
             let cpu = freesynth_core::synthesize(&input, &params).unwrap();
             let p = psnr(&gpu.image, &cpu.image);
@@ -284,6 +406,200 @@ mod tests {
                 assert!((r..53 - r).contains(&x) && (r..41 - r).contains(&y), "({x}, {y}), patch {patch_size}");
             }
         }
+    }
+
+    fn shifted_input() -> SynthesisInput {
+        let src = test_image(120, 90, 0.0);
+        SynthesisInput {
+            source_style: src.clone(),
+            source_guide: src,
+            target_guide: test_image(120, 90, 17.0),
+            target_modulation: None,
+            style_weights: vec![1.0 / 3.0; 3],
+            guide_weights: vec![1.0 / 3.0; 3],
+        }
+    }
+
+    /// Votes of the initial random field (no search): the GPU must reproduce the CPU's votes
+    /// exactly, with either rounding.
+    #[test]
+    fn votes_match_cpu_in_both_rounding_modes() {
+        let Some(ctx) = context() else { return };
+        let input = shifted_input();
+        for rounding in [VoteRounding::Truncate, VoteRounding::Nearest] {
+            let params = Params {
+                num_pyramid_levels: Some(1),
+                search_vote_iters: Some(PerLevel::Uniform(0)),
+                vote_rounding: Some(rounding),
+                seed: 9,
+                ..Params::default()
+            };
+            let out = ctx.synthesize(&input, &params).unwrap();
+            let nnf = nnf_init_random((120, 90), (120, 90), 5, &mut GlibcRand::new(9));
+            assert_eq!(out.nnf, nnf);
+            let mut want = Image::new(120, 90, 3);
+            vote_plain(&mut want, &input.source_style, &nnf, 5, rounding);
+            assert_eq!(out.image, want, "{rounding:?}");
+        }
+    }
+
+    /// One weighted vote after the initial field (no PatchMatch): the GPU's weights and rounding
+    /// must agree with the CPU's up to float summation order, so values differ by at most 1 and
+    /// only rarely.
+    #[test]
+    fn weighted_votes_match_cpu_in_both_rounding_modes() {
+        let Some(ctx) = context() else { return };
+        let input = shifted_input();
+        for rounding in [VoteRounding::Truncate, VoteRounding::Nearest] {
+            let params = Params {
+                num_pyramid_levels: Some(1),
+                search_vote_iters: Some(PerLevel::Uniform(1)),
+                patch_match_iters: Some(PerLevel::Uniform(0)),
+                vote_mode: Some(VoteMode::Weighted),
+                vote_rounding: Some(rounding),
+                seed: 9,
+                num_threads: Some(1),
+                ..Params::default()
+            };
+            let gpu = ctx.synthesize(&input, &params).unwrap();
+            let cpu = freesynth_core::synthesize(&input, &params).unwrap();
+            assert_eq!(gpu.nnf, cpu.nnf);
+            let diffs: Vec<i32> =
+                gpu.image.data().iter().zip(cpu.image.data()).map(|(&g, &c)| g as i32 - c as i32).collect();
+            let max = diffs.iter().map(|d| d.abs()).max().unwrap();
+            let differing = diffs.iter().filter(|&&d| d != 0).count() as f64 / diffs.len() as f64;
+            let mean = diffs.iter().sum::<i32>() as f64 / diffs.len() as f64;
+            println!("{rounding:?}: max |diff| {max}, {:.4}% differ, mean {mean:+.5}", 100.0 * differing);
+            assert!(max <= 1, "{rounding:?}: max |diff| {max}");
+            assert!(differing < 1e-3, "{rounding:?}: {:.4}% of values differ", 100.0 * differing);
+            assert!(mean.abs() < 0.01, "{rounding:?}: mean diff {mean}");
+        }
+    }
+
+    /// The per-pixel errors the GPU returns are the patch errors of its own output.
+    #[test]
+    fn returned_errors_match_the_cpu_evaluator() {
+        let Some(ctx) = context() else { return };
+        let input = shifted_input();
+        for extra_pass_3x3 in [false, true] {
+            let params = Params { return_errors: true, extra_pass_3x3, ..Params::default() };
+            let out = ctx.synthesize(&input, &params).unwrap();
+            let e = nnf_patch_errors(&input, &params, &out.image, &out.nnf).unwrap();
+            let errors = out.errors.as_deref().expect("errors requested");
+            assert_eq!(errors.len(), 120 * 90);
+            for (i, &v) in errors.iter().enumerate() {
+                let want = e.style[i] + e.guide[i];
+                assert!((v - want).abs() <= 1e-3 * want.max(1.0), "pixel {i}: GPU {v}, CPU {want}");
+            }
+            assert!(ctx.synthesize(&input, &Params { return_errors: false, ..params }).unwrap().errors.is_none());
+        }
+    }
+
+    /// A tiny budget splits the work into many command buffers, a huge one into very few; both
+    /// give a valid synthesis. Without the uniformity term the GPU engine is deterministic (no
+    /// races on the occupancy map), so there the split must not change a single value: a
+    /// dropped or reordered dispatch would.
+    #[test]
+    fn submissions_follow_the_budget() {
+        let Some(mut ctx) = context() else { return };
+        let input = shifted_input();
+        let params = Params::default();
+        let mut counts = Vec::new();
+        for budget in [1, u64::MAX] {
+            ctx.submission_budget = budget;
+            let (out, submissions) = engine::synthesize(&ctx, &input, &params).unwrap();
+            let p = psnr(&out.image, &freesynth_core::synthesize(&input, &params).unwrap().image);
+            assert!(p > 25.0, "budget {budget}: GPU vs CPU PSNR {p:.2} dB");
+            counts.push(submissions);
+        }
+        println!("submissions: {counts:?}");
+        assert_eq!(counts[1], 1);
+        assert!(counts[0] > 100, "{counts:?}");
+
+        for extra_pass_3x3 in [false, true] {
+            let params = Params { uniformity_weight: 0.0, extra_pass_3x3, ..Params::default() };
+            let mut outputs = Vec::new();
+            for budget in [u64::MAX, 1, 2_000_000] {
+                ctx.submission_budget = budget;
+                let (out, submissions) = engine::synthesize(&ctx, &input, &params).unwrap();
+                outputs.push((budget, submissions, out));
+            }
+            let (_, _, reference) = &outputs[0];
+            for (budget, submissions, out) in &outputs[1..] {
+                assert_eq!(out.nnf, reference.nnf, "budget {budget} ({submissions} submissions), extra pass {extra_pass_3x3}");
+                assert_eq!(out.image, reference.image, "budget {budget} ({submissions} submissions), extra pass {extra_pass_3x3}");
+            }
+            let n: Vec<usize> = outputs.iter().map(|o| o.1).collect();
+            assert!(n[0] < n[2] && n[2] < n[1], "submissions per budget: {n:?}");
+        }
+    }
+
+    #[test]
+    fn shares_an_external_device() {
+        let Some(ctx) = context() else { return };
+        let adapter = pollster::block_on(instance().request_adapter(&wgpu::RequestAdapterOptions::default())).unwrap();
+        // A device with wgpu's default limits has too few storage buffers.
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();
+        match GpuContext::from_device(device, queue) {
+            Err(GpuError::Device(msg)) => assert!(msg.contains("max_storage_buffers_per_shader_stage"), "{msg}"),
+            other => panic!("expected a limits error, got {:?}", other.err()),
+        }
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_limits: GpuContext::required_limits(&adapter.limits()),
+            ..Default::default()
+        }))
+        .unwrap();
+        let shared = GpuContext::from_device(device.clone(), queue).unwrap();
+        assert!(!shared.adapter_name().is_empty());
+        let input = shifted_input();
+        let out = shared.synthesize(&input, &Params::default()).unwrap();
+        let reference = ctx.synthesize(&input, &Params::default()).unwrap();
+        assert!(psnr(&out.image, &reference.image) > 25.0);
+        // The caller's handle still works afterwards.
+        let _ = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: 16,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+    }
+
+    /// Later syntheses reuse the compiled pipelines; a new layout or patch size adds entries.
+    #[test]
+    fn pipelines_are_cached_per_layout_and_patch_size() {
+        let Some(ctx) = context() else { return };
+        let input = shifted_input();
+        let first = ctx.synthesize(&input, &Params::default()).unwrap();
+        let count = |ctx: &GpuContext| ctx.pipelines.lock().unwrap().len();
+        assert_eq!(count(&ctx), 1);
+        let again = ctx.synthesize(&input, &Params { seed: 2, ..Params::default() }).unwrap();
+        assert_eq!(count(&ctx), 1);
+        assert!(psnr(&first.image, &again.image) > 25.0);
+        ctx.synthesize(&input, &Params { patch_size: 3, ..Params::default() }).unwrap();
+        ctx.synthesize(&input, &Params { extra_pass_3x3: true, ..Params::default() }).unwrap();
+        assert_eq!(count(&ctx), 2);
+    }
+
+    #[test]
+    fn required_limits_raise_a_callers_base() {
+        let adapter = wgpu::Limits { max_buffer_size: 1 << 32, ..wgpu::Limits::default() };
+        let base = wgpu::Limits { max_texture_dimension_2d: 16384, ..wgpu::Limits::downlevel_defaults() };
+        let l = GpuContext::required_limits_from(&base, &adapter);
+        assert!(check_limits(&l).is_ok(), "{:?}", check_limits(&l));
+        assert_eq!(l.max_texture_dimension_2d, 16384);
+        assert_eq!(l.max_buffer_size, 1 << 32);
+        assert_eq!(l.max_storage_buffers_per_shader_stage, REQUIRED_STORAGE_BUFFERS);
+        // Fields the caller already set higher are kept.
+        let big = wgpu::Limits { max_storage_buffers_per_shader_stage: 16, ..wgpu::Limits::default() };
+        assert_eq!(GpuContext::required_limits_from(&big, &adapter).max_storage_buffers_per_shader_stage, 16);
+    }
+
+    #[test]
+    fn limit_check_lists_every_shortfall() {
+        assert!(check_limits(&GpuContext::required_limits(&wgpu::Limits::default())).is_ok());
+        let msg = check_limits(&wgpu::Limits { max_bind_groups: 0, ..wgpu::Limits::default() }).unwrap_err();
+        assert!(msg.contains("max_storage_buffers_per_shader_stage is 8, needs 12"), "{msg}");
+        assert!(msg.contains("max_bind_groups is 0"), "{msg}");
     }
 
     #[test]

@@ -218,6 +218,15 @@ pub(crate) fn patchmatch(
     }
 }
 
+/// Patch errors of the current matches of `nnf` (`nnfError`), computed with `kernel`.
+pub(crate) fn nnf_errors(space: &PatchSpace<'_>, nnf: &Nnf, errors: &mut Vec<f32>, kernel: Kernel) {
+    match kernel {
+        Kernel::Fast => nnf_errors_k::<FAST>(space, nnf, errors),
+        Kernel::Exact => nnf_errors_k::<EXACT>(space, nnf, errors),
+        Kernel::Modulated => nnf_errors_k::<MODULATED>(space, nnf, errors),
+    }
+}
+
 /// Patch errors of the current matches (`nnfError`).
 fn nnf_errors_k<const K: u8>(space: &PatchSpace<'_>, nnf: &Nnf, errors: &mut Vec<f32>) {
     let w = nnf.width();

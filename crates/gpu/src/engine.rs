@@ -1,22 +1,25 @@
 //! Buffers, pipelines and the per-level schedule (`ebsynthCuda` in the original).
 //!
 //! All buffers are allocated once at the finest level's size and reused by every pyramid level.
-//! The schedule is recorded up front (one command buffer per level setup and per search/vote
-//! iteration), with a single readback at the end; the CPU never waits for the GPU in between.
-//! Per-level constants live in one uniform buffer, selected with dynamic offsets.
+//! The schedule is recorded up front with a single readback at the end; the CPU never waits for
+//! the GPU in between. Dispatches are grouped into command buffers by estimated cost (see
+//! [`Submitter`]), so that small levels share a submission and no submission runs long enough to
+//! trip a driver's GPU timeout. Per-level constants live in one uniform buffer, selected with
+//! dynamic offsets.
 
+use std::collections::HashMap;
 use std::num::NonZeroU64;
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::time::Instant;
 
 use freesynth_core::{
-    GlibcRand, Image, MAX_GUIDE_CHANNELS, MAX_STYLE_CHANNELS, Nnf, Params, PerLevel, SynthesisInput,
-    SynthesisOutput, VoteMode, max_pyramid_levels, nnf_init_random, pyramid_level_size,
+    Engine, GlibcRand, Image, Nnf, Params, Schedule, SynthesisInput, SynthesisOutput, VoteMode, VoteRounding,
+    nnf_init_random, pyramid_level_size,
 };
 use wgpu::util::DeviceExt;
 
 use crate::GpuContext;
-use crate::error::{GpuError, invalid};
+use crate::error::GpuError;
 
 /// Workgroup edge length of the synthesis kernels (WG x WG invocations).
 const WG: u32 = 8;
@@ -34,7 +37,7 @@ const PARAMS_HEADER: usize = 64;
 const RESAMPLE_PARAMS: usize = 32;
 
 /// Packed channel layout of a synthesis.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct Layout {
     /// u32 words per style pixel.
     style_w: usize,
@@ -68,70 +71,8 @@ impl Phase {
     }
 }
 
-fn covers<T>(v: &PerLevel<T>, n: usize) -> bool {
-    match v {
-        PerLevel::Uniform(_) => true,
-        PerLevel::Levels(l) => l.len() >= n,
-    }
-}
-
-/// Checks the input and parameters (same rules as the CPU engine) and returns the number of
-/// pyramid levels.
-fn validate(input: &SynthesisInput, params: &Params) -> Result<usize, GpuError> {
-    let ns = input.source_style.channels();
-    let ng = input.source_guide.channels();
-    if !(1..=MAX_STYLE_CHANNELS).contains(&ns) {
-        return invalid(format!("number of style channels must be 1..={MAX_STYLE_CHANNELS}, got {ns}"));
-    }
-    if !(1..=MAX_GUIDE_CHANNELS).contains(&ng) {
-        return invalid(format!("number of guide channels must be 1..={MAX_GUIDE_CHANNELS}, got {ng}"));
-    }
-    if input.source_guide.size() != input.source_style.size() {
-        return invalid("source guide and source style differ in size");
-    }
-    if input.target_guide.channels() != ng {
-        return invalid("source and target guides differ in channel count");
-    }
-    if let Some(m) = &input.target_modulation
-        && (m.size() != input.target_guide.size() || m.channels() != ng)
-    {
-        return invalid("target modulation must have the target guide's size and channels");
-    }
-    if input.style_weights.len() != ns || input.guide_weights.len() != ng {
-        return invalid("need one weight per style channel and one per guide channel");
-    }
-    if input.style_weights.iter().chain(&input.guide_weights).any(|w| !w.is_finite() || *w < 0.0) {
-        return invalid("weights must be finite and non-negative");
-    }
-    if params.patch_size < 3 || params.patch_size.is_multiple_of(2) {
-        return invalid("patch size must be an odd number >= 3");
-    }
-    if !params.uniformity_weight.is_finite() {
-        return invalid("uniformity weight must be finite");
-    }
-    let max_levels = max_pyramid_levels(input.source_style.size(), input.target_guide.size(), params.patch_size);
-    if max_levels == 0 {
-        return invalid(format!(
-            "source and target must be at least {0}x{0} pixels for patch size {1}",
-            2 * params.patch_size + 1,
-            params.patch_size
-        ));
-    }
-    let num_levels = match params.num_pyramid_levels {
-        Some(0) => return invalid("number of pyramid levels must be at least 1"),
-        Some(n) => n.min(max_levels),
-        None => max_levels,
-    };
-    if !covers(&params.search_vote_iters, num_levels)
-        || !covers(&params.patch_match_iters, num_levels)
-        || !covers(&params.stop_threshold, num_levels)
-    {
-        return invalid(format!("per-level settings must cover all {num_levels} pyramid levels"));
-    }
-    Ok(num_levels)
-}
-
 fn phases(params: &Params, num_levels: usize, source: (usize, usize), target: (usize, usize)) -> Vec<Phase> {
+    debug_assert!(num_levels > 0);
     let mut out: Vec<Phase> = (0..num_levels)
         .map(|level| Phase {
             level,
@@ -186,7 +127,7 @@ fn unpack_words(words: &[u32], width: usize, height: usize, channels: usize, per
 }
 
 /// The `Params` uniform of one phase (layout of `struct Params` in `synth.wgsl`).
-fn params_bytes(ph: &Phase, layout: Layout, input: &SynthesisInput, params: &Params) -> Vec<u8> {
+fn params_bytes(ph: &Phase, layout: Layout, input: &SynthesisInput, params: &Params, sched: &Schedule) -> Vec<u8> {
     let (tw, th) = ph.target;
     let (sw, sh) = ph.source;
     let p = ph.patch_size;
@@ -200,9 +141,9 @@ fn params_bytes(ph: &Phase, layout: Layout, input: &SynthesisInput, params: &Par
     int(ph.use_omega() as i64);
     b.extend_from_slice(&ph.lambda.to_le_bytes());
     b.extend_from_slice(&omega_best.to_le_bytes());
-    b.extend_from_slice(&params.stop_threshold.get(ph.level).to_le_bytes());
+    b.extend_from_slice(&sched.stop_threshold[ph.level].to_le_bytes());
     b.extend_from_slice(&params.seed.to_le_bytes());
-    b.extend_from_slice(&0u32.to_le_bytes());
+    b.extend_from_slice(&u32::from(sched.vote_rounding == VoteRounding::Nearest).to_le_bytes());
     b.extend_from_slice(&((p * p * ns) as f32).to_le_bytes());
     b.extend_from_slice(&[0u8; 8]);
     debug_assert_eq!(b.len(), PARAMS_HEADER);
@@ -219,7 +160,97 @@ fn resample_bytes(input: (usize, usize), output: (usize, usize), words: usize) -
     for (i, v) in [input.0, input.1, output.0, output.1, words].into_iter().enumerate() {
         b[i * 4..i * 4 + 4].copy_from_slice(&(v as u32).to_le_bytes());
     }
+    // The same scale as the CPU resampler (an exactly rounded division).
+    let scale = input.0 as f32 / output.0 as f32;
+    b[20..24].copy_from_slice(&scale.to_le_bytes());
     b
+}
+
+/// Bind group and pipeline layout of the synthesis kernels for one channel layout.
+#[derive(Clone)]
+struct SynthLayout {
+    bind_group_layout: wgpu::BindGroupLayout,
+    pipeline_layout: wgpu::PipelineLayout,
+}
+
+/// The resampling pipeline and its bind group layout.
+#[derive(Clone)]
+struct ResamplePipeline {
+    bind_group_layout: wgpu::BindGroupLayout,
+    pipeline: wgpu::ComputePipeline,
+}
+
+/// Pipelines compiled by earlier syntheses on one device, so that later syntheses with the same
+/// channel layout and patch size skip shader compilation. There are few distinct keys (channel
+/// word counts, modulation, patch size), so entries are never evicted.
+#[derive(Default)]
+pub(crate) struct PipelineCache {
+    layouts: HashMap<Layout, SynthLayout>,
+    kernels: HashMap<(Layout, usize), Arc<Kernels>>,
+    resample: Option<ResamplePipeline>,
+}
+
+impl PipelineCache {
+    /// Number of cached kernel sets.
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.kernels.len()
+    }
+
+    fn synth_layout(&mut self, device: &wgpu::Device, layout: Layout) -> SynthLayout {
+        self.layouts
+            .entry(layout)
+            .or_insert_with(|| {
+                let mut entries = vec![uniform_entry(layout.params_size())];
+                entries.extend((1..=3).map(|b| storage_entry(b, true)));
+                entries.extend((4..=12).map(|b| storage_entry(b, false)));
+                let bind_group_layout =
+                    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("synth"), entries: &entries });
+                let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("synth"),
+                    bind_group_layouts: &[Some(&bind_group_layout)],
+                    immediate_size: 0,
+                });
+                SynthLayout { bind_group_layout, pipeline_layout }
+            })
+            .clone()
+    }
+
+    fn kernels(&mut self, device: &wgpu::Device, synth: &SynthLayout, layout: Layout, patch_size: usize) -> Arc<Kernels> {
+        Arc::clone(
+            self.kernels
+                .entry((layout, patch_size))
+                .or_insert_with(|| Arc::new(Kernels::new(device, &synth.pipeline_layout, layout, patch_size))),
+        )
+    }
+
+    fn resample(&mut self, device: &wgpu::Device) -> ResamplePipeline {
+        self.resample
+            .get_or_insert_with(|| {
+                let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("resample"),
+                    entries: &[uniform_entry(RESAMPLE_PARAMS), storage_entry(1, true), storage_entry(2, false)],
+                });
+                let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("freesynth resample"),
+                    source: wgpu::ShaderSource::Wgsl(RESAMPLE_SHADER.into()),
+                });
+                let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some("resample"),
+                    layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                        label: Some("resample"),
+                        bind_group_layouts: &[Some(&bind_group_layout)],
+                        immediate_size: 0,
+                    })),
+                    module: &module,
+                    entry_point: Some("resample"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    cache: None,
+                });
+                ResamplePipeline { bind_group_layout, pipeline }
+            })
+            .clone()
+    }
 }
 
 /// The synthesis pipelines for one patch size.
@@ -340,27 +371,114 @@ fn round_up(v: usize, align: usize) -> usize {
     v.div_ceil(align) * align
 }
 
-/// Records one dispatch of a synthesis kernel over a `size` grid.
-fn dispatch(
-    pass: &mut wgpu::ComputePass<'_>,
-    pipeline: &wgpu::ComputePipeline,
-    group: &wgpu::BindGroup,
-    offset: u32,
-    size: (usize, usize),
-) {
-    pass.set_pipeline(pipeline);
-    pass.set_bind_group(0, group, &[offset]);
-    pass.dispatch_workgroups((size.0 as u32).div_ceil(WG), (size.1 as u32).div_ceil(WG), 1);
+/// Default for [`GpuContext::submission_budget`]: the estimated work, in [`Cost`] units, after
+/// which the current command buffer is submitted. About 30-40 ms on a current mid-range GPU, so
+/// a GPU ten to twenty times slower still stays well below the usual two-second driver timeout.
+pub(crate) const DEFAULT_SUBMISSION_BUDGET: u64 = 8_000_000_000;
+
+/// Estimated GPU work of one dispatch, in units of one packed 32-bit word compared between the
+/// target and the source (the inner step of the patch distance and the vote).
+#[derive(Clone, Copy, Debug)]
+struct Cost {
+    /// Words read per patch-pixel comparison: style plus guide (plus modulation) words.
+    words: u64,
+    /// Style words (for votes).
+    style_words: u64,
 }
 
-/// Records one compute pass with `record` and submits it (without waiting for it).
-fn submit_pass(device: &wgpu::Device, queue: &wgpu::Queue, record: impl FnOnce(&mut wgpu::ComputePass<'_>)) {
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("synthesis") });
-    {
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("synthesis"), timestamp_writes: None });
-        record(&mut pass);
+impl Cost {
+    fn new(layout: Layout) -> Self {
+        let words = (layout.style_w + layout.guide_w * (1 + layout.modulated as usize)) as u64;
+        Self { words, style_words: layout.style_w as u64 }
     }
-    queue.submit([encoder.finish()]);
+
+    fn pixels(size: (usize, usize)) -> u64 {
+        (size.0 * size.1) as u64
+    }
+
+    /// `candidates` patch distances per target pixel.
+    fn patches(self, size: (usize, usize), patch: usize, candidates: u64) -> u64 {
+        Self::pixels(size) * (patch * patch) as u64 * self.words * candidates
+    }
+
+    /// One vote over a target of `size`.
+    fn vote(self, size: (usize, usize), patch: usize) -> u64 {
+        Self::pixels(size) * (patch * patch) as u64 * self.style_words.max(1)
+    }
+
+    /// A kernel doing a small constant amount of work per pixel.
+    fn simple(size: (usize, usize), per_pixel: u64) -> u64 {
+        Self::pixels(size) * per_pixel
+    }
+}
+
+/// Records compute dispatches into command buffers and submits each buffer once its estimated
+/// work reaches the budget (without waiting for the GPU).
+///
+/// One buffer per fixed step (for example per search/vote iteration) either wastes submissions
+/// on the tiny coarse levels or, on large images, builds GPU jobs long enough to hit a driver
+/// timeout (Windows resets the GPU after two seconds by default; Linux drivers have similar
+/// watchdogs). A single dispatch is never split, so the budget bounds every submission to about
+/// the budget plus one dispatch.
+struct Submitter<'a> {
+    device: &'a wgpu::Device,
+    queue: &'a wgpu::Queue,
+    budget: u64,
+    encoder: Option<wgpu::CommandEncoder>,
+    pass: Option<wgpu::ComputePass<'static>>,
+    /// Estimated work recorded since the last submission.
+    pending: u64,
+    /// Number of command buffers submitted so far.
+    submissions: usize,
+}
+
+impl<'a> Submitter<'a> {
+    fn new(device: &'a wgpu::Device, queue: &'a wgpu::Queue, budget: u64) -> Self {
+        Self { device, queue, budget: budget.max(1), encoder: None, pass: None, pending: 0, submissions: 0 }
+    }
+
+    /// The open compute pass, after submitting the recorded work first if `cost` more would
+    /// exceed the budget.
+    fn pass_for(&mut self, cost: u64) -> &mut wgpu::ComputePass<'static> {
+        if self.pending > 0 && self.pending.saturating_add(cost) > self.budget {
+            self.flush();
+        }
+        self.pending = self.pending.saturating_add(cost);
+        if self.pass.is_none() {
+            let encoder = self.encoder.insert(
+                self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("synthesis") }),
+            );
+            let pass = encoder
+                .begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("synthesis"), timestamp_writes: None })
+                .forget_lifetime();
+            self.pass = Some(pass);
+        }
+        self.pass.as_mut().expect("pass was just opened")
+    }
+
+    /// Records one dispatch of a synthesis kernel over a `size` grid of pixels.
+    fn dispatch(&mut self, pipeline: &wgpu::ComputePipeline, group: &wgpu::BindGroup, offset: u32, size: (usize, usize), cost: u64) {
+        self.dispatch_groups(pipeline, group, offset, ((size.0 as u32).div_ceil(WG), (size.1 as u32).div_ceil(WG)), cost);
+    }
+
+    /// Records one dispatch of `groups` workgroups.
+    fn dispatch_groups(&mut self, pipeline: &wgpu::ComputePipeline, group: &wgpu::BindGroup, offset: u32, groups: (u32, u32), cost: u64) {
+        let pass = self.pass_for(cost);
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, group, &[offset]);
+        pass.dispatch_workgroups(groups.0, groups.1, 1);
+    }
+
+    /// Submits everything recorded so far.
+    fn flush(&mut self) {
+        // The pass must end before its encoder can finish.
+        self.pass = None;
+        if let Some(encoder) = self.encoder.take() {
+            self.queue.submit([encoder.finish()]);
+            self.submissions += 1;
+        }
+        self.pending = 0;
+    }
 }
 
 fn timing_enabled() -> bool {
@@ -368,11 +486,12 @@ fn timing_enabled() -> bool {
 }
 
 /// Runs a synthesis, turning wgpu validation and out-of-memory errors into [`GpuError`]s.
-pub(crate) fn synthesize(ctx: &GpuContext, input: &SynthesisInput, params: &Params) -> Result<SynthesisOutput, GpuError> {
-    let num_levels = validate(input, params)?;
+/// Also returns the number of command buffers submitted.
+pub(crate) fn synthesize(ctx: &GpuContext, input: &SynthesisInput, params: &Params) -> Result<(SynthesisOutput, usize), GpuError> {
+    let sched = params.schedule(input, Engine::Gpu).map_err(|e| GpuError::InvalidInput(e.to_string()))?;
     let oom = ctx.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
     let validation = ctx.device.push_error_scope(wgpu::ErrorFilter::Validation);
-    let result = run(ctx, input, params, num_levels);
+    let result = run(ctx, input, params, &sched);
     let validation = pollster::block_on(validation.pop());
     let oom = pollster::block_on(oom.pop());
     if let Some(e) = validation.or(oom) {
@@ -381,7 +500,7 @@ pub(crate) fn synthesize(ctx: &GpuContext, input: &SynthesisInput, params: &Para
     result
 }
 
-fn run(ctx: &GpuContext, input: &SynthesisInput, params: &Params, num_levels: usize) -> Result<SynthesisOutput, GpuError> {
+fn run(ctx: &GpuContext, input: &SynthesisInput, params: &Params, sched: &Schedule) -> Result<(SynthesisOutput, usize), GpuError> {
     let t_start = Instant::now();
     let (device, queue) = (&ctx.device, &ctx.queue);
     let limits = device.limits();
@@ -391,8 +510,9 @@ fn run(ctx: &GpuContext, input: &SynthesisInput, params: &Params, num_levels: us
     let layout = Layout { style_w: ns.div_ceil(4), guide_w: ng.div_ceil(4), modulated: input.target_modulation.is_some() };
     let source_size = input.source_style.size();
     let target_size = input.target_guide.size();
+    let num_levels = sched.num_levels;
     let phases = phases(params, num_levels, source_size, target_size);
-    let use_mask = params.use_stop_threshold;
+    let use_mask = sched.use_stop_threshold;
 
     // --- Limits -------------------------------------------------------------------------------
     let src_px = (source_size.0 * source_size.1) as u64;
@@ -402,7 +522,8 @@ fn run(ctx: &GpuContext, input: &SynthesisInput, params: &Params, num_levels: us
     let largest = (src_px * src_words * 4).max(tgt_px * (tgt_words * 4).max(8));
     if largest > limits.max_storage_buffer_binding_size || largest > limits.max_buffer_size {
         return Err(GpuError::TooLarge(format!(
-            "a {largest}-byte buffer is needed, the device allows {}",
+            "a {largest}-byte buffer is needed, the device allows {} (max_storage_buffer_binding_size \
+             and max_buffer_size; a device created with GpuContext::required_limits gets the adapter's maximum)",
             limits.max_storage_buffer_binding_size.min(limits.max_buffer_size)
         )));
     }
@@ -455,7 +576,7 @@ fn run(ctx: &GpuContext, input: &SynthesisInput, params: &Params, num_levels: us
     let slot = round_up(params_size, align);
     let mut uniform = vec![0u8; slot * phases.len()];
     for (i, ph) in phases.iter().enumerate() {
-        uniform[i * slot..i * slot + params_size].copy_from_slice(&params_bytes(ph, layout, input, params));
+        uniform[i * slot..i * slot + params_size].copy_from_slice(&params_bytes(ph, layout, input, params, sched));
     }
     let params_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("params"),
@@ -487,17 +608,15 @@ fn run(ctx: &GpuContext, input: &SynthesisInput, params: &Params, num_levels: us
     });
 
     // --- Pipelines and bind groups ------------------------------------------------------------
-    let mut entries = vec![uniform_entry(params_size)];
-    entries.extend((1..=3).map(|b| storage_entry(b, true)));
-    entries.extend((4..=12).map(|b| storage_entry(b, false)));
-    let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("synth"), entries: &entries });
-    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("synth"),
-        bind_group_layouts: &[Some(&bgl)],
-        immediate_size: 0,
-    });
-    let kernels = Kernels::new(device, &pipeline_layout, layout, params.patch_size);
-    let kernels_3x3 = (params.extra_pass_3x3 && params.patch_size != 3).then(|| Kernels::new(device, &pipeline_layout, layout, 3));
+    let (synth_layout, kernels, kernels_3x3, resample_pipeline) = {
+        let mut cache = ctx.pipelines.lock().unwrap_or_else(|e| e.into_inner());
+        let synth_layout = cache.synth_layout(device, layout);
+        let kernels = cache.kernels(device, &synth_layout, layout, params.patch_size);
+        let kernels_3x3 =
+            (params.extra_pass_3x3 && params.patch_size != 3).then(|| cache.kernels(device, &synth_layout, layout, 3));
+        (synth_layout, kernels, kernels_3x3, cache.resample(device))
+    };
+    let bgl = &synth_layout.bind_group_layout;
 
     // groups[s][n]: style buffer `s` and NNF buffer `n` are the current ones.
     let group = |s: usize, n: usize| {
@@ -507,36 +626,17 @@ fn run(ctx: &GpuContext, input: &SynthesisInput, params: &Params, num_levels: us
         ];
         let mut e = vec![uniform_binding(&params_buf, params_size)];
         e.extend(bufs.iter().enumerate().map(|(i, b)| wgpu::BindGroupEntry { binding: i as u32 + 1, resource: b.as_entire_binding() }));
-        device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("synth"), layout: &bgl, entries: &e })
+        device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("synth"), layout: bgl, entries: &e })
     };
     let groups = [[group(0, 0), group(0, 1)], [group(1, 0), group(1, 1)]];
 
-    let rbgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("resample"),
-        entries: &[uniform_entry(RESAMPLE_PARAMS), storage_entry(1, true), storage_entry(2, false)],
-    });
-    let rmodule = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("freesynth resample"),
-        source: wgpu::ShaderSource::Wgsl(RESAMPLE_SHADER.into()),
-    });
-    let resample = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some("resample"),
-        layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("resample"),
-            bind_group_layouts: &[Some(&rbgl)],
-            immediate_size: 0,
-        })),
-        module: &rmodule,
-        entry_point: Some("resample"),
-        compilation_options: wgpu::PipelineCompilationOptions::default(),
-        cache: None,
-    });
+    let resample = &resample_pipeline.pipeline;
     let rgroups: Vec<wgpu::BindGroup> = resample_jobs
         .iter()
         .map(|&(full, level_buf, ..)| {
             device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("resample"),
-                layout: &rbgl,
+                layout: &resample_pipeline.bind_group_layout,
                 entries: &[
                     uniform_binding(&rparams_buf, RESAMPLE_PARAMS),
                     wgpu::BindGroupEntry { binding: 1, resource: full.as_entire_binding() },
@@ -548,76 +648,84 @@ fn run(ctx: &GpuContext, input: &SynthesisInput, params: &Params, num_levels: us
     let t_setup = Instant::now();
 
     // --- Schedule -----------------------------------------------------------------------------
-    // Every level's setup and every search/vote iteration is submitted as its own command
-    // buffer, so that no single GPU job runs long enough to trigger a driver timeout on large
-    // images. Nothing waits for the GPU until the final readback.
+    // Nothing waits for the GPU until the final readback; the submitter cuts the recording into
+    // command buffers of bounded work.
+    let cost = Cost::new(layout);
+    let mut sub = Submitter::new(device, queue, ctx.submission_budget);
     let (mut cs, mut cn) = (0usize, 0usize); // current style / NNF buffer
     let finest = num_levels - 1;
-    submit_pass(device, queue, |pass| {
-        dispatch(pass, &kernels.init_rng, &groups[cs][cn], (finest * slot) as u32, phases[finest].target);
-    });
+    sub.dispatch(&kernels.init_rng, &groups[cs][cn], (finest * slot) as u32, phases[finest].target, Cost::simple(phases[finest].target, 4));
+    let mut last_kernels = &*kernels;
     for (pi, ph) in phases.iter().enumerate() {
         let k = match &kernels_3x3 {
-            Some(k3) if ph.patch_size != params.patch_size => k3,
-            _ => &kernels,
+            Some(k3) if ph.patch_size != params.patch_size => &**k3,
+            _ => &*kernels,
         };
+        last_kernels = k;
         let off = (pi * slot) as u32;
         let (tsz, ssz) = (ph.target, ph.source);
+        let p = ph.patch_size;
 
-        submit_pass(device, queue, |pass| {
-            if !ph.extra {
-                pass.set_pipeline(&resample);
-                for (j, (g, &(_, _, _, _, is_target))) in rgroups.iter().zip(&resample_jobs).enumerate() {
-                    let out = if is_target { tsz } else { ssz };
-                    pass.set_bind_group(0, g, &[((ph.level * resample_jobs.len() + j) * rslot) as u32]);
-                    pass.dispatch_workgroups((out.0 as u32).div_ceil(RESAMPLE_WG), (out.1 as u32).div_ceil(RESAMPLE_WG), 1);
-                }
-                if ph.level > 0 {
-                    dispatch(pass, &k.upscale_nnf, &groups[cs][cn], off, tsz);
+        if !ph.extra {
+            for (j, (g, &(_, _, words, _, is_target))) in rgroups.iter().zip(&resample_jobs).enumerate() {
+                let out = if is_target { tsz } else { ssz };
+                let groups = ((out.0 as u32).div_ceil(RESAMPLE_WG), (out.1 as u32).div_ceil(RESAMPLE_WG));
+                let roff = ((ph.level * resample_jobs.len() + j) * rslot) as u32;
+                sub.dispatch_groups(resample, g, roff, groups, Cost::simple(out, 16 * words as u64));
+            }
+            if ph.level > 0 {
+                sub.dispatch(&k.upscale_nnf, &groups[cs][cn], off, tsz, Cost::simple(tsz, 4));
+                cn ^= 1;
+            }
+            if ph.use_omega() {
+                sub.dispatch(&k.clear_omega, &groups[cs][cn], off, ssz, Cost::simple(ssz, 1));
+                sub.dispatch(&k.init_omega, &groups[cs][cn], off, tsz, Cost::simple(tsz, (p * p) as u64));
+            }
+        }
+        sub.dispatch(&k.vote_plain, &groups[cs][cn], off, tsz, cost.vote(tsz, p));
+        cs ^= 1;
+        if use_mask {
+            sub.dispatch(&k.clear_mask, &groups[cs][cn], off, tsz, Cost::simple(tsz, 1));
+        }
+
+        // Random search tries radii 1, 2, 4, ... below max(sw, sh) / 2.
+        let radii = (ssz.0.max(ssz.1) / 2).max(1).next_power_of_two().trailing_zeros() as u64;
+        let num_sv = sched.search_vote_iters[ph.level];
+        let num_pm = sched.patch_match_iters[ph.level];
+        for vote_iter in 0..num_sv {
+            sub.dispatch(&k.eval_error, &groups[cs][cn], off, tsz, cost.patches(tsz, p, 1));
+            for _ in 0..num_pm {
+                for prop in &k.propagate {
+                    sub.dispatch(prop, &groups[cs][cn], off, tsz, cost.patches(tsz, p, 4));
                     cn ^= 1;
                 }
-                if ph.use_omega() {
-                    dispatch(pass, &k.clear_omega, &groups[cs][cn], off, ssz);
-                    dispatch(pass, &k.init_omega, &groups[cs][cn], off, tsz);
-                }
+                sub.dispatch(&k.random_search, &groups[cs][cn], off, tsz, cost.patches(tsz, p, radii));
             }
-            dispatch(pass, &k.vote_plain, &groups[cs][cn], off, tsz);
+            let vote = match sched.vote_mode {
+                VoteMode::Plain => &k.vote_plain,
+                VoteMode::Weighted => &k.vote_weighted,
+            };
+            sub.dispatch(vote, &groups[cs][cn], off, tsz, cost.vote(tsz, p));
             cs ^= 1;
-            if use_mask {
-                dispatch(pass, &k.clear_mask, &groups[cs][cn], off, tsz);
+            if use_mask && vote_iter + 1 < num_sv {
+                sub.dispatch(&k.eval_mask, &groups[cs][cn], off, tsz, Cost::simple(tsz, cost.style_words));
+                sub.dispatch(&k.dilate_mask, &groups[cs][cn], off, tsz, Cost::simple(tsz, (p * p) as u64));
             }
-        });
-
-        let num_sv = params.search_vote_iters.get(ph.level);
-        let num_pm = params.patch_match_iters.get(ph.level);
-        for vote_iter in 0..num_sv {
-            submit_pass(device, queue, |pass| {
-                dispatch(pass, &k.eval_error, &groups[cs][cn], off, tsz);
-                for _ in 0..num_pm {
-                    for p in &k.propagate {
-                        dispatch(pass, p, &groups[cs][cn], off, tsz);
-                        cn ^= 1;
-                    }
-                    dispatch(pass, &k.random_search, &groups[cs][cn], off, tsz);
-                }
-                let vote = match params.vote_mode {
-                    VoteMode::Plain => &k.vote_plain,
-                    VoteMode::Weighted => &k.vote_weighted,
-                };
-                dispatch(pass, vote, &groups[cs][cn], off, tsz);
-                cs ^= 1;
-                if use_mask && vote_iter + 1 < num_sv {
-                    dispatch(pass, &k.eval_mask, &groups[cs][cn], off, tsz);
-                    dispatch(pass, &k.dilate_mask, &groups[cs][cn], off, tsz);
-                }
-            });
         }
     }
+    if params.return_errors {
+        // Patch errors of the final field against the final image (now the current style).
+        let last = phases.len() - 1;
+        let ph = &phases[last];
+        sub.dispatch(&last_kernels.eval_error, &groups[cs][cn], (last * slot) as u32, ph.target, cost.patches(ph.target, ph.patch_size, 1));
+    }
+    sub.flush();
 
     // --- Readback -----------------------------------------------------------------------------
     let (tw, th) = target_size;
     let style_bytes = tgt_px * sw4;
     let nnf_bytes = tgt_px * 8;
+    let err_bytes = tgt_px * 4;
     let staging = |label: &str, size: u64| {
         device.create_buffer(&wgpu::BufferDescriptor {
             label: Some(label),
@@ -628,20 +736,25 @@ fn run(ctx: &GpuContext, input: &SynthesisInput, params: &Params, num_levels: us
     };
     let style_out = staging("style readback", style_bytes);
     let nnf_out = staging("NNF readback", nnf_bytes);
+    let err_out = params.return_errors.then(|| staging("error readback", err_bytes));
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("readback") });
     encoder.copy_buffer_to_buffer(&style[cs], 0, &style_out, 0, style_bytes);
     encoder.copy_buffer_to_buffer(&nnf[cn], 0, &nnf_out, 0, nnf_bytes);
+    if let Some(e) = &err_out {
+        encoder.copy_buffer_to_buffer(&err, 0, e, 0, err_bytes);
+    }
     queue.submit([encoder.finish()]);
 
+    let readbacks: Vec<&wgpu::Buffer> = [Some(&style_out), Some(&nnf_out), err_out.as_ref()].into_iter().flatten().collect();
     let (tx, rx) = mpsc::channel();
-    for b in [&style_out, &nnf_out] {
+    for b in &readbacks {
         let tx = tx.clone();
         b.map_async(wgpu::MapMode::Read, .., move |r| {
             let _ = tx.send(r);
         });
     }
     device.poll(wgpu::PollType::wait_indefinitely()).map_err(|e| GpuError::Wgpu(e.to_string()))?;
-    for _ in 0..2 {
+    for _ in 0..readbacks.len() {
         rx.recv()
             .map_err(|_| GpuError::Wgpu("buffer mapping was cancelled".into()))?
             .map_err(|e| GpuError::Wgpu(format!("cannot read back results: {e}")))?;
@@ -656,15 +769,23 @@ fn run(ctx: &GpuContext, input: &SynthesisInput, params: &Params, num_levels: us
         let view = nnf_out.get_mapped_range(..).map_err(|e| GpuError::Wgpu(e.to_string()))?;
         Nnf::from_raw(tw, th, bytemuck::cast_slice::<u8, [i32; 2]>(&view).to_vec())
     };
+    let errors = match &err_out {
+        Some(b) => {
+            let view = b.get_mapped_range(..).map_err(|e| GpuError::Wgpu(e.to_string()))?;
+            Some(bytemuck::cast_slice::<u8, f32>(&view).to_vec())
+        }
+        None => None,
+    };
     if timing_enabled() {
         eprintln!(
-            "gpu: setup {:.1} ms, synthesis {:.1} ms ({} phases)",
+            "gpu: setup {:.1} ms, synthesis {:.1} ms ({} phases, {} submissions)",
             (t_setup - t_start).as_secs_f64() * 1e3,
             (t_gpu - t_setup).as_secs_f64() * 1e3,
-            phases.len()
+            phases.len(),
+            sub.submissions
         );
     }
-    Ok(SynthesisOutput { image, nnf })
+    Ok((SynthesisOutput { image, nnf, errors }, sub.submissions))
 }
 
 #[cfg(test)]
@@ -696,17 +817,31 @@ mod tests {
         };
         let layout = Layout { style_w: 1, guide_w: 2, modulated: false };
         let params = Params::default();
+        let sched = params.schedule_for_levels(2, Engine::Gpu).unwrap();
         let ph = &phases(&params, 2, (40, 30), (40, 30))[1];
-        let b = params_bytes(ph, layout, &input, &params);
+        let b = params_bytes(ph, layout, &input, &params, &sched);
         assert_eq!(b.len(), layout.params_size());
         let f = |i: usize| f32::from_le_bytes(b[i * 4..i * 4 + 4].try_into().unwrap());
         let u = |i: usize| u32::from_le_bytes(b[i * 4..i * 4 + 4].try_into().unwrap());
         assert_eq!((u(0), u(1), u(4), u(5), u(6)), (40, 30, 20, 15, 5));
         assert_eq!(f(8), 3500.0);
         assert_eq!(f(9), 25.0); // same size: omega_best = patch^2
+        assert_eq!(u(12), 1); // round votes
+        let compat = Params::compat();
+        let b = params_bytes(ph, layout, &input, &compat, &compat.schedule_for_levels(2, Engine::Gpu).unwrap());
+        assert_eq!(u32::from_le_bytes(b[48..52].try_into().unwrap()), 0);
         assert_eq!(f(13), 75.0);
         assert_eq!([f(16), f(17), f(18), f(19)], [1.0, 1.0, 1.0, 0.0]);
         assert_eq!([f(20), f(25), f(26), f(27)], [0.5, 0.5, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn resample_params_carry_the_exact_scale() {
+        let b = resample_bytes((48, 30), (48, 30), 2);
+        assert_eq!(f32::from_le_bytes(b[20..24].try_into().unwrap()), 1.0);
+        let b = resample_bytes((1200, 912), (75, 57), 4);
+        assert_eq!(f32::from_le_bytes(b[20..24].try_into().unwrap()), 16.0);
+        assert_eq!(u32::from_le_bytes(b[16..20].try_into().unwrap()), 4);
     }
 
     #[test]

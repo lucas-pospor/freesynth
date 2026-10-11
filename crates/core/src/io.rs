@@ -8,7 +8,8 @@
 //! stb_image and 16-bit images are reduced the same way; JPEG pixels can differ slightly because
 //! decoders use different IDCTs and chroma upsampling.
 //!
-//! Nearest-neighbour fields can be stored in a small binary format (see [`write_nnf`]).
+//! Nearest-neighbour fields can be stored in a small binary format (see [`write_nnf`]), and
+//! per-pixel float maps such as patch errors as greyscale PFM (see [`write_pfm`]).
 
 use std::io::{Cursor, Read, Write};
 use std::path::Path;
@@ -194,6 +195,91 @@ pub fn load_nnf(path: impl AsRef<Path>) -> Result<Nnf, Error> {
     read_nnf(std::io::BufReader::new(file))
 }
 
+/// Writes a single-channel float map (for example the per-pixel patch errors of a synthesis) as a
+/// greyscale Portable Float Map (`Pf`), which many image tools read.
+///
+/// `values` holds `width * height` values in scan-line order, top row first. The file stores
+/// little-endian `f32` rows bottom row first, as the format requires.
+pub fn write_pfm(values: &[f32], width: usize, height: usize, mut w: impl Write) -> Result<(), Error> {
+    if values.len() != width * height {
+        return invalid(format!("{} values do not fill a {width}x{height} map", values.len()));
+    }
+    let header = format!("Pf\n{width} {height}\n-1.0\n");
+    let mut buf = Vec::with_capacity(header.len() + values.len() * 4);
+    buf.extend_from_slice(header.as_bytes());
+    if width > 0 {
+        for row in values.chunks_exact(width).rev() {
+            for v in row {
+                buf.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+    }
+    w.write_all(&buf)?;
+    Ok(())
+}
+
+/// Reads a greyscale Portable Float Map (either byte order). Returns `(width, height, values)`
+/// with the values in scan-line order, top row first.
+pub fn read_pfm(mut r: impl Read) -> Result<(usize, usize, Vec<f32>), Error> {
+    // The header is three whitespace-separated tokens after the magic, ended by one whitespace
+    // byte.
+    let mut tokens: Vec<String> = Vec::new();
+    let mut token = String::new();
+    let mut byte = [0u8; 1];
+    while tokens.len() < 4 {
+        if r.read(&mut byte)? == 0 {
+            return invalid("not a PFM file (truncated header)");
+        }
+        let c = byte[0] as char;
+        if c.is_ascii_whitespace() {
+            if !token.is_empty() {
+                tokens.push(std::mem::take(&mut token));
+            }
+        } else if token.len() < 32 {
+            token.push(c);
+        } else {
+            return invalid("not a PFM file (bad header)");
+        }
+    }
+    if tokens[0] != "Pf" {
+        return invalid("not a greyscale PFM file (expected magic 'Pf')");
+    }
+    let parse = |t: &str| t.parse::<usize>().map_err(|_| Error::InvalidInput(format!("bad PFM size '{t}'")));
+    let (width, height) = (parse(&tokens[1])?, parse(&tokens[2])?);
+    let scale: f32 = tokens[3].parse().map_err(|_| Error::InvalidInput(format!("bad PFM scale '{}'", tokens[3])))?;
+    let little = scale < 0.0;
+    let Some(len) = width.checked_mul(height).and_then(|n| n.checked_mul(4)) else {
+        return invalid("PFM size overflows");
+    };
+    let mut body = Vec::new();
+    r.take(len as u64 + 1).read_to_end(&mut body)?;
+    if body.len() != len {
+        return invalid(format!("PFM file holds {} data bytes, expected {len} for {width}x{height}", body.len()));
+    }
+    let mut values: Vec<f32> = body
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|&b| if little { f32::from_le_bytes(b) } else { f32::from_be_bytes(b) })
+        .collect();
+    if width > 0 {
+        // Bottom-up rows to top-down.
+        let rows: Vec<Vec<f32>> = values.chunks_exact(width).rev().map(<[f32]>::to_vec).collect();
+        values = rows.concat();
+    }
+    Ok((width, height, values))
+}
+
+/// Saves a single-channel float map as greyscale PFM (see [`write_pfm`]).
+pub fn save_pfm(values: &[f32], width: usize, height: usize, path: impl AsRef<Path>) -> Result<(), Error> {
+    write_pfm(values, width, height, std::fs::File::create(path)?)
+}
+
+/// Loads a greyscale PFM file (see [`read_pfm`]).
+pub fn load_pfm(path: impl AsRef<Path>) -> Result<(usize, usize, Vec<f32>), Error> {
+    read_pfm(std::io::BufReader::new(std::fs::File::open(path)?))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -248,6 +334,35 @@ mod tests {
             save_png(&img, &bare).unwrap();
             assert_eq!(select_channels(&load_rgba(&bare).unwrap(), nc), img);
         }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn pfm_round_trip() {
+        let values = [0.0f32, 1.5, -2.0, 1e9, 7.25, f32::MAX];
+        let mut buf = Vec::new();
+        write_pfm(&values, 3, 2, &mut buf).unwrap();
+        assert!(buf.starts_with(b"Pf\n3 2\n-1.0\n"));
+        // Bottom row first.
+        let data = &buf[buf.len() - 24..];
+        assert_eq!(&data[..4], &1e9f32.to_le_bytes());
+        assert_eq!(read_pfm(buf.as_slice()).unwrap(), (3, 2, values.to_vec()));
+
+        // Big-endian files (positive scale) read too.
+        let mut be = b"Pf 2 1 1.0\n".to_vec();
+        be.extend_from_slice(&3.0f32.to_be_bytes());
+        be.extend_from_slice(&4.0f32.to_be_bytes());
+        assert_eq!(read_pfm(be.as_slice()).unwrap(), (2, 1, vec![3.0, 4.0]));
+
+        assert!(write_pfm(&values, 4, 2, Vec::new()).is_err());
+        assert!(read_pfm(&buf[..buf.len() - 1]).is_err());
+        assert!(read_pfm(&b"PF\n1 1\n-1.0\n\0\0\0\0"[..]).is_err());
+        assert!(read_pfm(&b"Pf\n1"[..]).is_err());
+
+        let dir = scratch_dir("freesynth-pfm");
+        std::fs::create_dir_all(&dir).unwrap();
+        save_pfm(&values, 2, 3, dir.join("e.pfm")).unwrap();
+        assert_eq!(load_pfm(dir.join("e.pfm")).unwrap(), (2, 3, values.to_vec()));
         std::fs::remove_dir_all(&dir).ok();
     }
 

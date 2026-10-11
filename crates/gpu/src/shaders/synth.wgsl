@@ -41,7 +41,7 @@ struct Params {
     omega_best: f32,            // occupancy of a perfectly uniform assignment
     stop_threshold: u32,
     seed: u32,
-    _pad2: u32,
+    round_votes: u32,           // 1: round votes to nearest, 0: truncate (2019)
     vote_norm: f32,             // patch_size^2 * style channels (weighted voting)
     _pad0: u32, _pad1: u32,
     style_w: array<vec4<f32>, STYLE_W>,
@@ -357,7 +357,7 @@ fn random_search(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(workgro
 
 /// `krnlVotePlain`: average of the source pixels the overlapping patches map onto each target
 /// pixel. Patches that fall outside the target or source are skipped (as in the CPU engine).
-/// Integer arithmetic gives exactly the CPU engine's truncated float average.
+/// Integer arithmetic gives exactly the CPU engine's truncated or rounded float average.
 @compute @workgroup_size(WG, WG)
 fn vote_plain(@builtin(global_invocation_id) gid: vec3<u32>) {
     let t = target_pixel(gid);
@@ -381,8 +381,9 @@ fn vote_plain(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     let o = u32(t.y * P.tw + t.x) * STYLE_W;
     let c = max(count, 1u);
+    let half = select(0u, c / 2u, P.round_votes != 0u);
     for (var k = 0u; k < STYLE_W; k++) {
-        style_new[o + k] = pack4xU8(acc[k] / c);
+        style_new[o + k] = pack4xU8((acc[k] + vec4<u32>(half)) / c);
     }
 }
 
@@ -428,10 +429,11 @@ fn vote_weighted(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     let o = u32(t.y * P.tw + t.x) * STYLE_W;
     let inv = 1.0 / wsum;
+    // When truncating, the small bias keeps exact averages from dropping one step because of the
+    // GPU's approximate division.
+    let bias = select(2e-4, 0.5, P.round_votes != 0u);
     for (var k = 0u; k < STYLE_W; k++) {
-        // The small bias keeps exact averages from truncating one step down because of the
-        // GPU's approximate division.
-        style_new[o + k] = pack4xU8Clamp(vec4<u32>(acc[k] * inv + 2e-4));
+        style_new[o + k] = pack4xU8Clamp(vec4<u32>(acc[k] * inv + bias));
     }
 }
 

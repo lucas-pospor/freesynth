@@ -3,6 +3,10 @@
 // Output pixel (x, y) samples the input at (s*x, s*y), s = in_w / out_w, with clamped
 // addressing. The arithmetic follows freesynth-core's CPU resampler (a product followed by
 // three fused multiply-adds). Pixels are `words` u32 words of four 8-bit channels each.
+//
+// The host computes `s`: GPU division is approximate (WGSL allows 2.5 ulp), and a scale of
+// 0.99999994 instead of 1 blends every pixel with its neighbour and truncates, so about half the
+// channels of a full-resolution level would come out one step low.
 
 struct ResampleParams {
     in_w: i32,
@@ -10,7 +14,7 @@ struct ResampleParams {
     out_w: i32,
     out_h: i32,
     words: u32,
-    _pad0: u32,
+    scale: f32,                 // in_w / out_w, correctly rounded
     _pad1: u32,
     _pad2: u32,
 }
@@ -24,7 +28,7 @@ fn resample(@builtin(global_invocation_id) gid: vec3<u32>) {
     let x = i32(gid.x);
     let y = i32(gid.y);
     if (x >= RP.out_w || y >= RP.out_h) { return; }
-    let s = f32(RP.in_w) / f32(RP.out_w);
+    let s = RP.scale;
     let fx = s * f32(x);
     let fy = s * f32(y);
     let ix = i32(fx);

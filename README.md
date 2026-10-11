@@ -14,7 +14,7 @@ License: GPL-3.0-or-later.
 
 ## Command line
 
-`freesynth` accepts the same options and defaults as the 2019 `ebsynth` tool:
+`freesynth` accepts the options of the 2019 `ebsynth` tool:
 
 ```bash
 target/release/freesynth -style source_style.png \
@@ -24,12 +24,19 @@ target/release/freesynth -style source_style.png \
 
 Options: `-style`, `-guide <src> <tgt>`, `-weight` (applies to the preceding `-style`/`-guide`),
 `-output`, `-uniformity` (3500), `-patchsize` (5), `-pyramidlevels` (max), `-searchvoteiters` (6),
-`-patchmatchiters` (4), `-stopthreshold` (5; accepted but not applied, as in the 2019 CPU
-engine), `-extrapass3x3`, `-backend cpu|gpu`.
+`-patchmatchiters`, `-stopthreshold` (5), `-extrapass3x3`, `-backend cpu|gpu`.
 
-Extra options: `-seed <n>`, `-threads <n>`, `-bands <n>` (number of PatchMatch bands, one per
-thread by default), `-deterministic` (same output for a given seed and band count), `-bitexact`
-(with `-threads 1`, reproduces the 2019 CPU build's arithmetic; slower).
+By default `freesynth` uses its own `default` preset: 2 PatchMatch iterations instead of 4 (4 for
+patch size 3), weighted voting and rounded votes. On our test images it is about 1.8 times faster
+than the 2019 schedule on both backends, with patch energy within about 1%. `-preset fast` trades
+a little quality for more speed, `-preset high` runs the full 2019 schedule with weighted voting,
+and `-compat` reproduces the 2019 tool. Options given explicitly override the preset.
+
+Other options: `-preset`, `-compat`, `-vote plain|weighted`, `-stopmask on|off`,
+`-modulation <map.png>` (per-pixel weight map for the preceding `-guide`), `-seed <n>`,
+`-threads <n>`, `-bands <n>`, `-deterministic` (same output for a given seed and band count),
+`-bitexact` (with `-threads 1`, reproduces the 2019 CPU build's arithmetic; implies `-compat`),
+`-dumpnnf <file>` and `-dumperror <file.pfm>`.
 
 The output is always written as PNG, whatever the file name.
 

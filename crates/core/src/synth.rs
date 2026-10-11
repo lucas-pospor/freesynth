@@ -12,10 +12,11 @@ use crate::io::{eval_num_channels, select_channels};
 use crate::mask::{ACTIVE, dilate_mask, eval_mask};
 use crate::nnf::{nnf_init_random, nnf_upscale};
 use crate::patch::{PatchSpace, pack};
-use crate::patchmatch::{OmegaWorkspace, PatchMatchConfig, patchmatch};
-use crate::pyramid::{max_pyramid_levels, pyramid_level_size, resample};
+use crate::patchmatch::{OmegaWorkspace, PatchMatchConfig, nnf_errors, patchmatch};
+use crate::pyramid::{pyramid_level_size, resample};
 use crate::rng::GlibcRand;
-use crate::vote::{vote_plain, vote_weighted};
+use crate::schedule::{Engine, Preset};
+use crate::vote::{VoteRounding, vote_plain, vote_weighted};
 use crate::{MAX_GUIDE_CHANNELS, MAX_STYLE_CHANNELS};
 
 /// How patches are blended into the output.
@@ -57,7 +58,8 @@ impl<T: Copy> PerLevel<T> {
         }
     }
 
-    fn covers(&self, num_levels: usize) -> bool {
+    /// Whether a value is given for each of `num_levels` levels.
+    pub(crate) fn covers(&self, num_levels: usize) -> bool {
         match self {
             PerLevel::Uniform(_) => true,
             PerLevel::Levels(v) => v.len() >= num_levels,
@@ -65,29 +67,41 @@ impl<T: Copy> PerLevel<T> {
     }
 }
 
-/// Synthesis parameters. [`Params::default`] matches the defaults of the 2019 `ebsynth` CLI.
+/// Synthesis parameters.
+///
+/// [`Params::default`] uses the [`Preset::Default`] preset; [`Params::compat`] reproduces the
+/// defaults of the 2019 `ebsynth` CLI. The schedule settings that are `Option`s (iteration counts,
+/// stop mask, voting) come from the preset unless they are set explicitly; see
+/// [`Params::schedule`] for the resolved values.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Params {
+    /// Speed/quality preset that supplies every schedule setting left at `None`.
+    pub preset: Preset,
     /// Weight of the uniformity term (`-uniformity`, default 3500; 500-15000 is reasonable).
     pub uniformity_weight: f32,
     /// Patch size, odd and at least 3 (`-patchsize`, default 5).
     pub patch_size: usize,
-    /// Voting mode (the 2019 CLI always uses [`VoteMode::Plain`]).
-    pub vote_mode: VoteMode,
+    /// Voting mode. `None`: weighted, except plain in [`Preset::Compat`] (the 2019 CLI always
+    /// voted plain).
+    pub vote_mode: Option<VoteMode>,
+    /// How votes are converted to 8 bits. `None`: rounding, except truncation (as in 2019) in
+    /// [`Preset::Compat`].
+    pub vote_rounding: Option<VoteRounding>,
     /// Number of pyramid levels (`-pyramidlevels`). `None` uses the maximum for which the
     /// coarsest level is at least `2 * patch_size + 1` pixels; larger values are clamped to it.
     pub num_pyramid_levels: Option<usize>,
-    /// Search/vote iterations per level (`-searchvoteiters`, default 6).
-    pub search_vote_iters: PerLevel<usize>,
-    /// PatchMatch iterations per search/vote iteration (`-patchmatchiters`, default 4).
-    pub patch_match_iters: PerLevel<usize>,
-    /// Stop threshold per level (`-stopthreshold`, default 5). Only used when
-    /// [`use_stop_threshold`](Self::use_stop_threshold) is set.
+    /// Search/vote iterations per level (`-searchvoteiters`). `None`: 6, except fewer at the two
+    /// finest levels in [`Preset::Fast`] on the GPU.
+    pub search_vote_iters: Option<PerLevel<usize>>,
+    /// PatchMatch iterations per search/vote iteration (`-patchmatchiters`). `None`: 4 in
+    /// [`Preset::Compat`] and [`Preset::High`], 2 in the other presets (4 for 3x3 patches).
+    pub patch_match_iters: Option<PerLevel<usize>>,
+    /// Stop threshold per level (`-stopthreshold`, default 5). Only used with the stop mask.
     pub stop_threshold: PerLevel<u32>,
     /// Skip PatchMatch for pixels whose neighbourhood changed by less than the stop threshold in
-    /// the last vote. The 2019 CPU engine ignored the threshold and only its CUDA engine applied
-    /// it, so this is off by default to reproduce the CPU engine.
-    pub use_stop_threshold: bool,
+    /// the last vote. `None`: only in [`Preset::Fast`]. (The 2019 CPU engine ignored the
+    /// threshold; only its CUDA engine applied it.)
+    pub use_stop_threshold: Option<bool>,
     /// Finish with an extra pass using 3x3 patches and no uniformity term (`-extrapass3x3`).
     pub extra_pass_3x3: bool,
     /// Random seed, with the semantics of `srand()` (the original never seeds: 1).
@@ -101,28 +115,36 @@ pub struct Params {
     pub num_bands: Option<usize>,
     /// How threads share the uniformity occupancy map.
     pub omega_sync: OmegaSync,
-    /// Accumulate patch errors sequentially in the original order so that, single-threaded,
-    /// results match the 2019 build bit for bit. Slower; mostly useful for validation.
+    /// Accumulate patch errors sequentially in the original order so that, single-threaded and
+    /// with [`Preset::Compat`], results match the 2019 build bit for bit. Slower; mostly useful
+    /// for validation. Only changes how the CPU engine sums errors: it does not change the
+    /// schedule or the voting, so with any other preset it reproduces nothing.
     pub bit_exact: bool,
+    /// Also return the final per-pixel patch errors ([`SynthesisOutput::errors`]). Costs one
+    /// extra error evaluation at the finest level.
+    pub return_errors: bool,
 }
 
 impl Default for Params {
     fn default() -> Self {
         Self {
+            preset: Preset::Default,
             uniformity_weight: 3500.0,
             patch_size: 5,
-            vote_mode: VoteMode::Plain,
+            vote_mode: None,
+            vote_rounding: None,
             num_pyramid_levels: None,
-            search_vote_iters: PerLevel::Uniform(6),
-            patch_match_iters: PerLevel::Uniform(4),
+            search_vote_iters: None,
+            patch_match_iters: None,
             stop_threshold: PerLevel::Uniform(5),
-            use_stop_threshold: false,
+            use_stop_threshold: None,
             extra_pass_3x3: false,
             seed: 1,
             num_threads: None,
             num_bands: None,
             omega_sync: OmegaSync::Shared,
             bit_exact: false,
+            return_errors: false,
         }
     }
 }
@@ -138,8 +160,12 @@ pub struct SynthesisInput {
     pub source_guide: Image,
     /// Target guides, same channels as `source_guide`; defines the output size.
     pub target_guide: Image,
-    /// Optional per-pixel guide modulation, same shape as `target_guide`:
-    /// `guideError *= modulation / 255`.
+    /// Optional per-pixel, per-channel guide weights, same shape as `target_guide`. At target
+    /// pixel `p`, the squared difference of guide channel `k` is multiplied by
+    /// `modulation[p][k] / 255` on top of `guide_weights[k]`: 255 keeps the channel's full
+    /// weight, 0 switches it off at that pixel. The style channels are not affected. Use it to
+    /// lower a guide's influence where the guide is unreliable (for example, where an advected
+    /// position guide has lost track). [`GuideLayer::with_modulation`] builds it per layer.
     pub target_modulation: Option<Image>,
     /// One weight per style channel.
     pub style_weights: Vec<f32>,
@@ -154,15 +180,25 @@ pub struct GuideLayer {
     pub target: Image,
     /// Total weight of the layer; `None` means `1 / number_of_guides` (the CLI default).
     pub weight: Option<f32>,
+    /// Optional per-pixel weight map for this layer: one channel, the size of `target`. At each
+    /// target pixel the layer's guide error is scaled by `value / 255` (see
+    /// [`SynthesisInput::target_modulation`]). `None` means full weight everywhere.
+    pub modulation: Option<Image>,
 }
 
 impl GuideLayer {
     pub fn new(source: Image, target: Image) -> Self {
-        Self { source, target, weight: None }
+        Self { source, target, weight: None, modulation: None }
     }
 
     pub fn with_weight(mut self, weight: f32) -> Self {
         self.weight = Some(weight);
+        self
+    }
+
+    /// Sets the layer's per-pixel weight map (one channel, the target's size).
+    pub fn with_modulation(mut self, map: Image) -> Self {
+        self.modulation = Some(map);
         self
     }
 }
@@ -171,7 +207,9 @@ impl SynthesisInput {
     /// Builds the input from RGBA layers exactly like the 2019 CLI: each image keeps only its
     /// informative channels (see [`eval_num_channels`]), a guide pair uses the larger channel
     /// count of its two images, and each layer's weight is split evenly over its channels.
-    /// The style weight defaults to 1.
+    /// The style weight defaults to 1. If any layer has a [modulation map](GuideLayer::modulation),
+    /// the result gets a [`target_modulation`](Self::target_modulation) that repeats each map
+    /// over its layer's channels (255 for layers without one).
     pub fn from_rgba_layers(style: &Image, style_weight: Option<f32>, guides: &[GuideLayer]) -> Result<Self, Error> {
         if style.channels() != 4 || guides.iter().any(|g| g.source.channels() != 4 || g.target.channels() != 4) {
             return invalid("from_rgba_layers expects RGBA images");
@@ -188,6 +226,11 @@ impl SynthesisInput {
             }
             if g.target.size() != target_size {
                 return invalid(format!("target guide {i} doesn't match the resolution of target guide 0"));
+            }
+            if let Some(m) = &g.modulation
+                && (m.size() != target_size || m.channels() != 1)
+            {
+                return invalid(format!("modulation map of guide {i} must be one channel of the target's size"));
             }
             counts.push(eval_num_channels(&g.source).max(eval_num_channels(&g.target)));
         }
@@ -212,6 +255,18 @@ impl SynthesisInput {
         let source_guide = concat(|g| &g.source, style.size());
         let target_guide = concat(|g| &g.target, target_size);
 
+        let target_modulation = guides.iter().any(|g| g.modulation.is_some()).then(|| {
+            let (w, h) = target_size;
+            let mut data = Vec::with_capacity(w * h * ng);
+            for i in 0..w * h {
+                for (g, &n) in guides.iter().zip(&counts) {
+                    let v = g.modulation.as_ref().map_or(255, |m| m.data()[i]);
+                    data.extend(std::iter::repeat_n(v, n));
+                }
+            }
+            Image::from_raw(w, h, ng, data)
+        });
+
         let sw = style_weight.unwrap_or(1.0);
         let style_weights = vec![sw / ns as f32; ns];
         let mut guide_weights = Vec::with_capacity(ng);
@@ -223,7 +278,7 @@ impl SynthesisInput {
             source_style: select_channels(style, ns),
             source_guide,
             target_guide,
-            target_modulation: None,
+            target_modulation,
             style_weights,
             guide_weights,
         })
@@ -265,6 +320,12 @@ pub struct SynthesisOutput {
     pub image: Image,
     /// The final nearest-neighbour field (source patch centre for every target pixel).
     pub nnf: Nnf,
+    /// With [`Params::return_errors`], the final patch error of every target pixel in scan-line
+    /// order: the weighted SSD (style plus modulated guide channels, summed over the patch, no
+    /// uniformity term) between the target patch of the output image and the source patch the
+    /// final field points at. The patch size is 3 after [`Params::extra_pass_3x3`]. `None`
+    /// when not requested. The map has the size of [`image`](Self::image).
+    pub errors: Option<Vec<f32>>,
 }
 
 /// Per-level images.
@@ -298,6 +359,20 @@ impl<'a> Level<'a> {
         let zeros = vec![0u8; target_size.0 * target_size.1 * ns];
         let target_packed = pack(&zeros, ns, target_guide.data(), ng, target_size.0 * target_size.1);
         Self { source_size, target_size, source_style, target_modulation, source_packed, target_packed, nc: ns + ng }
+    }
+
+    /// The patch space of this level for the current target style.
+    fn space<'s>(&'s self, ns: usize, patch_size: usize, weights: &'s [f32]) -> PatchSpace<'s> {
+        PatchSpace::new(
+            self.target_size,
+            self.source_size,
+            ns,
+            patch_size,
+            &self.target_packed,
+            &self.source_packed,
+            weights,
+            self.target_modulation.as_deref().map(|m| m.data()),
+        )
     }
 
     /// Copies `style` into the style slots of the packed target.
@@ -347,31 +422,9 @@ fn thread_pool(n: usize) -> Result<Arc<rayon::ThreadPool>, Error> {
 
 /// [`synthesize`] on the current rayon thread pool.
 fn synthesize_here(input: &SynthesisInput, params: &Params) -> Result<SynthesisOutput, Error> {
-    input.validate()?;
-    if params.patch_size < 3 || params.patch_size.is_multiple_of(2) {
-        return invalid("patch size must be an odd number >= 3");
-    }
-    if !params.uniformity_weight.is_finite() {
-        return invalid("uniformity weight must be finite");
-    }
-    let source_size = input.source_style.size();
-    let target_size = input.target_guide.size();
-    let max_levels = max_pyramid_levels(source_size, target_size, params.patch_size);
-    if max_levels == 0 {
-        return invalid(format!(
-            "source and target must be at least {0}x{0} pixels for patch size {1}",
-            2 * params.patch_size + 1,
-            params.patch_size
-        ));
-    }
-    let num_levels = match params.num_pyramid_levels {
-        Some(0) => return invalid("number of pyramid levels must be at least 1"),
-        Some(n) => n.min(max_levels),
-        None => max_levels,
-    };
-    if !params.search_vote_iters.covers(num_levels) || !params.patch_match_iters.covers(num_levels) || !params.stop_threshold.covers(num_levels) {
-        return invalid(format!("per-level settings must cover all {num_levels} pyramid levels"));
-    }
+    let sched = params.schedule(input, Engine::Cpu)?;
+    let num_levels = sched.num_levels;
+    let rounding = sched.vote_rounding;
 
     let bands = params.num_bands.unwrap_or_else(rayon::current_num_threads).max(1);
     let ns = input.source_style.channels();
@@ -406,42 +459,33 @@ fn synthesize_here(input: &SynthesisInput, params: &Params) -> Result<SynthesisO
         let lv = level_data.as_mut().expect("level data");
         let (tw, th) = lv.target_size;
 
-        vote_plain(&mut style, &lv.source_style, &nnf, patch_size);
+        vote_plain(&mut style, &lv.source_style, &nnf, patch_size, rounding);
         lv.set_target_style(&style);
 
-        let mut mask = params.use_stop_threshold.then(|| vec![ACTIVE; tw * th]);
-        let num_sv = params.search_vote_iters.get(level);
+        let mut mask = sched.use_stop_threshold.then(|| vec![ACTIVE; tw * th]);
+        let num_sv = sched.search_vote_iters[level];
         for vote_iter in 0..num_sv {
             {
-                let space = PatchSpace::new(
-                    lv.target_size,
-                    lv.source_size,
-                    ns,
-                    patch_size,
-                    &lv.target_packed,
-                    &lv.source_packed,
-                    &weights,
-                    lv.target_modulation.as_deref().map(|m| m.data()),
-                );
+                let space = lv.space(ns, patch_size, &weights);
                 let cfg = PatchMatchConfig {
                     lambda,
-                    num_iters: params.patch_match_iters.get(level),
+                    num_iters: sched.patch_match_iters[level],
                     num_bands: bands,
                     sync: params.omega_sync,
                     kernel: space.kernel(params.bit_exact),
                 };
                 patchmatch(&space, &mut nnf, &mut errors, &cfg, &mut rng, mask.as_deref(), &mut omega_ws);
             }
-            match params.vote_mode {
-                VoteMode::Plain => vote_plain(&mut style2, &lv.source_style, &nnf, patch_size),
-                VoteMode::Weighted => vote_weighted(&mut style2, &lv.source_style, &nnf, &errors, patch_size),
+            match sched.vote_mode {
+                VoteMode::Plain => vote_plain(&mut style2, &lv.source_style, &nnf, patch_size, rounding),
+                VoteMode::Weighted => vote_weighted(&mut style2, &lv.source_style, &nnf, &errors, patch_size, rounding),
             }
             std::mem::swap(&mut style, &mut style2);
             lv.set_target_style(&style);
 
             if let Some(m) = mask.as_mut()
                 && vote_iter + 1 < num_sv {
-                    eval_mask(&style, &style2, params.stop_threshold.get(level), m);
+                    eval_mask(&style, &style2, sched.stop_threshold[level], m);
                     *m = dilate_mask(m, tw, th, patch_size);
                 }
         }
@@ -455,7 +499,14 @@ fn synthesize_here(input: &SynthesisInput, params: &Params) -> Result<SynthesisO
                 lambda = 0.0;
                 continue;
             }
-            return Ok(SynthesisOutput { image: style, nnf });
+            let errors = params.return_errors.then(|| {
+                // The target already holds the final image, so this is the error of the final
+                // field against the output, with the kernel the search used.
+                let space = lv.space(ns, patch_size, &weights);
+                nnf_errors(&space, &nnf, &mut errors, space.kernel(params.bit_exact));
+                errors
+            });
+            return Ok(SynthesisOutput { image: style, nnf, errors });
         }
         level += 1;
     }
@@ -513,18 +564,110 @@ mod tests {
     fn identity_synthesis_other_modes() {
         let img = test_image(64, 64);
         let mut input = identity_input(&img);
-        let params = Params {
-            vote_mode: VoteMode::Weighted,
-            use_stop_threshold: true,
-            extra_pass_3x3: true,
-            ..Params::default()
-        };
-        let out = synthesize(&input, &params).unwrap();
-        assert!(psnr(&out.image, &img) > 35.0);
+        for preset in Preset::ALL {
+            let params = Params {
+                vote_mode: Some(VoteMode::Weighted),
+                use_stop_threshold: Some(true),
+                extra_pass_3x3: true,
+                ..Params::with_preset(preset)
+            };
+            let out = synthesize(&input, &params).unwrap();
+            assert!(psnr(&out.image, &img) > 35.0, "{preset}");
+            let out = synthesize(&input, &Params::with_preset(preset)).unwrap();
+            assert!(psnr(&out.image, &img) > 35.0, "{preset}");
+        }
 
         input.target_modulation = Some(Image::from_raw(64, 64, 3, vec![255; 64 * 64 * 3]));
         let out = synthesize(&input, &Params::default()).unwrap();
         assert!(psnr(&out.image, &img) > 35.0);
+    }
+
+    /// A target that differs from the source, so that the synthesis has real work to do.
+    fn shifted_input() -> SynthesisInput {
+        let mut input = identity_input(&test_image(72, 56));
+        input.target_guide = resample(&test_image(36, 28), 72, 56);
+        input
+    }
+
+    #[test]
+    fn returned_errors_are_the_final_patch_errors() {
+        let input = shifted_input();
+        for extra_pass_3x3 in [false, true] {
+            let params = Params { return_errors: true, extra_pass_3x3, omega_sync: OmegaSync::PerTile, num_threads: Some(2), ..Params::default() };
+            let out = synthesize(&input, &params).unwrap();
+            let e = crate::nnf_patch_errors(&input, &params, &out.image, &out.nnf).unwrap();
+            let errors = out.errors.as_deref().expect("errors requested");
+            assert_eq!(errors.len(), 72 * 56);
+            for (i, &v) in errors.iter().enumerate() {
+                let want = e.style[i] + e.guide[i];
+                assert!((v - want).abs() <= 1e-3 * want.max(1.0), "pixel {i}: {v} vs {want}");
+            }
+            // The flag does not change the synthesis.
+            let plain = synthesize(&input, &Params { return_errors: false, ..params }).unwrap();
+            assert!(plain.errors.is_none());
+            assert_eq!((plain.image, plain.nnf), (out.image, out.nnf));
+        }
+    }
+
+    #[test]
+    fn compat_preset_runs_the_2019_schedule() {
+        // Compat must equal explicitly setting the 2019 schedule and voting on another preset.
+        let input = shifted_input();
+        let base = Params { omega_sync: OmegaSync::PerTile, num_threads: Some(3), ..Params::compat() };
+        let explicit = Params {
+            search_vote_iters: Some(PerLevel::Uniform(6)),
+            patch_match_iters: Some(PerLevel::Uniform(4)),
+            use_stop_threshold: Some(false),
+            vote_mode: Some(VoteMode::Plain),
+            vote_rounding: Some(VoteRounding::Truncate),
+            ..Params { preset: Preset::Fast, ..base.clone() }
+        };
+        let (a, b) = (synthesize(&input, &base).unwrap(), synthesize(&input, &explicit).unwrap());
+        assert_eq!((&a.image, &a.nnf), (&b.image, &b.nnf));
+        // And the default preset gives a different (faster) result.
+        let d = synthesize(&input, &Params { preset: Preset::Default, ..base }).unwrap();
+        assert_ne!(d.nnf, b.nnf);
+    }
+
+    #[test]
+    fn layer_modulation_builds_target_modulation() {
+        let w = 3;
+        let rgba = |f: &dyn Fn(usize) -> [u8; 4]| Image::from_raw(w, 1, 4, (0..w).flat_map(f).collect());
+        let style = rgba(&|i| [i as u8, 2, 3, 255]);
+        let colour = rgba(&|i| [i as u8, 9, 1, 255]); // 3 channels
+        let gray = rgba(&|i| [i as u8 * 9, i as u8 * 9, i as u8 * 9, 255]); // 1 channel
+        let map = Image::from_raw(w, 1, 1, vec![0, 100, 255]);
+        let plain = SynthesisInput::from_rgba_layers(&style, None, &[GuideLayer::new(colour.clone(), colour.clone())]).unwrap();
+        assert!(plain.target_modulation.is_none());
+        let input = SynthesisInput::from_rgba_layers(
+            &style,
+            None,
+            &[GuideLayer::new(colour.clone(), colour.clone()), GuideLayer::new(gray.clone(), gray.clone()).with_modulation(map.clone())],
+        )
+        .unwrap();
+        let m = input.target_modulation.as_ref().unwrap();
+        assert_eq!((m.size(), m.channels()), ((3, 1), 4));
+        assert_eq!(m.pixel(0, 0), &[255, 255, 255, 0]);
+        assert_eq!(m.pixel(1, 0), &[255, 255, 255, 100]);
+        assert_eq!(m.pixel(2, 0), &[255, 255, 255, 255]);
+        let bad = GuideLayer::new(gray.clone(), gray.clone()).with_modulation(Image::new(2, 1, 1));
+        assert!(SynthesisInput::from_rgba_layers(&style, None, &[bad]).is_err());
+        let bad = GuideLayer::new(gray.clone(), gray).with_modulation(Image::new(3, 1, 2));
+        assert!(SynthesisInput::from_rgba_layers(&style, None, &[bad]).is_err());
+    }
+
+    #[test]
+    fn zero_modulation_switches_a_guide_off() {
+        // With the only guide modulated to zero everywhere, guide errors vanish: every final
+        // patch error is a pure style error.
+        let mut input = shifted_input();
+        input.target_modulation = Some(Image::new(72, 56, 3));
+        let params = Params { return_errors: true, num_threads: Some(2), ..Params::default() };
+        let out = synthesize(&input, &params).unwrap();
+        let e = crate::nnf_patch_errors(&input, &params, &out.image, &out.nnf).unwrap();
+        assert!(e.guide.iter().all(|&g| g == 0.0));
+        let full = crate::nnf_patch_errors(&shifted_input(), &params, &out.image, &out.nnf).unwrap();
+        assert!(full.guide.iter().sum::<f32>() > 0.0);
     }
 
     #[test]
@@ -581,7 +724,7 @@ mod tests {
         let img = test_image(60, 44);
         let mut input = identity_input(&img);
         input.target_guide = resample(&test_image(30, 22), 60, 44);
-        let base = Params { omega_sync: OmegaSync::PerTile, num_bands: Some(5), ..Params::default() };
+        let base = Params { omega_sync: OmegaSync::PerTile, num_bands: Some(5), use_stop_threshold: Some(true), ..Params::default() };
         let a = synthesize(&input, &Params { num_threads: Some(2), ..base.clone() }).unwrap();
         let b = synthesize(&input, &Params { num_threads: Some(3), ..base.clone() }).unwrap();
         assert_eq!(a.nnf, b.nnf);

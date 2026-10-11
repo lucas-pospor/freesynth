@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use freesynth_core::{Params, SynthesisInput, SynthesisOutput};
+use freesynth_core::{Engine, Params, SynthesisInput, SynthesisOutput};
 
 /// A synthesis backend.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -34,6 +34,14 @@ impl Backend {
         match self {
             Backend::Cpu => true,
             Backend::Gpu => !freesynth_gpu::list_adapters().is_empty(),
+        }
+    }
+
+    /// The engine kind presets are resolved for.
+    pub fn engine(self) -> Engine {
+        match self {
+            Backend::Cpu => Engine::Cpu,
+            Backend::Gpu => Engine::Gpu,
         }
     }
 

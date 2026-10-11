@@ -28,8 +28,3 @@ impl fmt::Display for GpuError {
 }
 
 impl std::error::Error for GpuError {}
-
-/// Shorthand for an [`GpuError::InvalidInput`] result.
-pub(crate) fn invalid<T>(msg: impl Into<String>) -> Result<T, GpuError> {
-    Err(GpuError::InvalidInput(msg.into()))
-}
