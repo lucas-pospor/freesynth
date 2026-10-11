@@ -15,7 +15,7 @@ use crate::patch::{PatchSpace, pack};
 use crate::patchmatch::{OmegaWorkspace, PatchMatchConfig, nnf_errors, patchmatch};
 use crate::pyramid::{pyramid_level_size, resample};
 use crate::rng::GlibcRand;
-use crate::schedule::{Engine, Preset};
+use crate::schedule::{Engine, Preset, SearchMode};
 use crate::vote::{VoteRounding, vote_plain, vote_weighted};
 use crate::{MAX_GUIDE_CHANNELS, MAX_STYLE_CHANNELS};
 
@@ -90,12 +90,15 @@ pub struct Params {
     /// Number of pyramid levels (`-pyramidlevels`). `None` uses the maximum for which the
     /// coarsest level is at least `2 * patch_size + 1` pixels; larger values are clamped to it.
     pub num_pyramid_levels: Option<usize>,
-    /// Search/vote iterations per level (`-searchvoteiters`). `None`: 6, except fewer at the two
-    /// finest levels in [`Preset::Fast`] on the GPU.
+    /// Search/vote iterations per level (`-searchvoteiters`). `None`: 6, except 4 at the finest
+    /// level in [`Preset::Fast`] on the GPU.
     pub search_vote_iters: Option<PerLevel<usize>>,
     /// PatchMatch iterations per search/vote iteration (`-patchmatchiters`). `None`: 4 in
     /// [`Preset::Compat`] and [`Preset::High`], 2 in the other presets (4 for 3x3 patches).
     pub patch_match_iters: Option<PerLevel<usize>>,
+    /// PatchMatch variant of the GPU engine (`-search`; the CPU engine has one). `None`:
+    /// [`SearchMode::Compat`] in [`Preset::Compat`], [`SearchMode::Improved`] in the other presets.
+    pub search: Option<SearchMode>,
     /// Stop threshold per level (`-stopthreshold`, default 5). Only used with the stop mask.
     pub stop_threshold: PerLevel<u32>,
     /// Skip PatchMatch for pixels whose neighbourhood changed by less than the stop threshold in
@@ -136,6 +139,7 @@ impl Default for Params {
             num_pyramid_levels: None,
             search_vote_iters: None,
             patch_match_iters: None,
+            search: None,
             stop_threshold: PerLevel::Uniform(5),
             use_stop_threshold: None,
             extra_pass_3x3: false,
@@ -611,7 +615,8 @@ mod tests {
 
     #[test]
     fn compat_preset_runs_the_2019_schedule() {
-        // Compat must equal explicitly setting the 2019 schedule and voting on another preset.
+        // Compat must equal explicitly setting the 2019 schedule, voting and search on another
+        // preset.
         let input = shifted_input();
         let base = Params { omega_sync: OmegaSync::PerTile, num_threads: Some(3), ..Params::compat() };
         let explicit = Params {
@@ -620,10 +625,14 @@ mod tests {
             use_stop_threshold: Some(false),
             vote_mode: Some(VoteMode::Plain),
             vote_rounding: Some(VoteRounding::Truncate),
+            search: Some(SearchMode::Compat),
             ..Params { preset: Preset::Fast, ..base.clone() }
         };
         let (a, b) = (synthesize(&input, &base).unwrap(), synthesize(&input, &explicit).unwrap());
         assert_eq!((&a.image, &a.nnf), (&b.image, &b.nnf));
+        // The CPU engine has one search, so the search mode does not change its result.
+        let improved = synthesize(&input, &Params { search: Some(SearchMode::Improved), ..base.clone() }).unwrap();
+        assert_eq!((&improved.image, &improved.nnf), (&a.image, &a.nnf));
         // And the default preset gives a different (faster) result.
         let d = synthesize(&input, &Params { preset: Preset::Default, ..base }).unwrap();
         assert_ne!(d.nnf, b.nnf);

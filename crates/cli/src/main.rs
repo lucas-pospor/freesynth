@@ -10,8 +10,8 @@ mod backend;
 use std::process::ExitCode;
 
 use freesynth_core::{
-    GuideLayer, Image, MAX_GUIDE_CHANNELS, MAX_STYLE_CHANNELS, OmegaSync, Params, PerLevel, Preset, SynthesisInput,
-    VoteMode, VoteRounding, io, max_pyramid_levels,
+    GuideLayer, Image, MAX_GUIDE_CHANNELS, MAX_STYLE_CHANNELS, OmegaSync, Params, PerLevel, Preset, SearchMode,
+    SynthesisInput, VoteMode, VoteRounding, io, max_pyramid_levels,
 };
 
 use crate::backend::Backend;
@@ -41,15 +41,17 @@ fn print_usage(program: &str) {
     println!("freesynth extensions:");
     println!("  -preset <name>        default: 2 PatchMatch iterations (4 for patch size 3),");
     println!("                          weighted voting, rounding");
-    println!("                        fast: default plus the stop mask (and on the GPU fewer");
-    println!("                          search/vote iterations at the two finest levels)");
+    println!("                        fast: default plus the stop mask (and on the GPU 4");
+    println!("                          search/vote iterations at the finest level)");
     println!("                        high: 4 PatchMatch iterations, weighted voting, rounding");
-    println!("                        compat: the 2019 ebsynth schedule and plain voting");
+    println!("                        compat: the 2019 ebsynth schedule, search and plain voting");
     println!("                        explicit options below and above override the preset");
     println!("  -compat               same as -preset compat");
     println!("  -vote <mode>          patch voting: plain or weighted");
     println!("  -stopmask <on|off>    skip pixels that changed less than -stopthreshold");
     println!("                        (-stopthreshold only matters with the stop mask)");
+    println!("  -search <mode>        GPU PatchMatch variant: improved (checkerboard propagation;");
+    println!("                        all presets but compat) or compat (the 2019 CUDA search)");
     println!("  -modulation <map.png> per-pixel weight map (grey, 255 = full weight) for the");
     println!("                        preceding -guide");
     println!("  -seed <number>        random seed (default 1)");
@@ -94,6 +96,8 @@ struct Options {
     vote: Option<VoteMode>,
     /// `-stopmask`, if given.
     stop_mask: Option<bool>,
+    /// `-search`, if given.
+    search: Option<SearchMode>,
 }
 
 impl Options {
@@ -229,6 +233,7 @@ fn parse_args(args: &[String]) -> Result<Options, u8> {
         preset: None,
         vote: None,
         stop_mask: None,
+        search: None,
     };
     let mut weight_target = WeightTarget::None;
     let mut p = Parser { args, i: 1 };
@@ -396,6 +401,15 @@ fn parse_args(args: &[String]) -> Result<Options, u8> {
                 }
             });
         });
+        try_opt!(p.string("-search"), |name| {
+            match name.parse::<SearchMode>() {
+                Ok(mode) => o.search = Some(mode),
+                Err(e) => {
+                    println!("error: {e}");
+                    return Err(1);
+                }
+            }
+        });
         try_opt!(p.string("-modulation"), |v| {
             match weight_target {
                 WeightTarget::Guide(g) => o.guides[g].modulation = Some(v),
@@ -506,8 +520,8 @@ fn run_inner(args: &[String]) -> Result<(), u8> {
     // The 2019 schedule keeps the 2019 tool's summary; anything else also names the preset and
     // the settings the 2019 tool did not have.
     let as_2019 = o.preset() == Preset::Compat
-        && (schedule.vote_mode, schedule.vote_rounding, schedule.use_stop_threshold)
-            == (VoteMode::Plain, VoteRounding::Truncate, false);
+        && (schedule.vote_mode, schedule.vote_rounding, schedule.use_stop_threshold, schedule.search)
+            == (VoteMode::Plain, VoteRounding::Truncate, false, SearchMode::Compat);
     if !as_2019 {
         println!("preset: {}", o.preset());
     }
@@ -528,6 +542,10 @@ fn run_inner(args: &[String]) -> Result<(), u8> {
             VoteRounding::Truncate => "truncated",
         };
         println!("vote: {mode} ({rounding})");
+        if o.backend == Backend::Gpu {
+            // The CPU engine has a single search.
+            println!("search: {}", schedule.search);
+        }
     }
     println!("extrapass3x3: {}", if o.extra_pass_3x3 { "yes" } else { "no" });
     println!("backend: {}", o.backend.name());
@@ -577,6 +595,7 @@ fn build_params(o: &Options, num_levels: usize) -> Params {
         patch_match_iters: o.patch_match_iters.map(|v| PerLevel::Uniform(v as usize)),
         stop_threshold: PerLevel::Uniform(o.stop_threshold as u32),
         use_stop_threshold: o.stop_mask,
+        search: o.search,
         extra_pass_3x3: o.extra_pass_3x3,
         seed: o.seed as u32,
         num_threads: (o.threads > 0).then_some(o.threads as usize),
@@ -632,7 +651,7 @@ mod tests {
         let s = schedule("-style a -guide b c -patchsize 3", Engine::Cpu);
         assert_eq!(s.patch_match_iters, vec![4; 7]);
         let s = schedule("-style a -guide b c -preset fast", Engine::Gpu);
-        assert_eq!(s.search_vote_iters, [6, 6, 6, 6, 6, 4, 3]);
+        assert_eq!(s.search_vote_iters, [6, 6, 6, 6, 6, 6, 4]);
         assert!(s.use_stop_threshold);
         // Explicit options win over the preset.
         let s = schedule("-style a -guide b c -preset fast -searchvoteiters 5 -patchmatchiters 1 -stopmask off -vote plain", Engine::Gpu);
@@ -642,6 +661,11 @@ mod tests {
         assert_eq!((s.patch_match_iters, s.vote_mode), (vec![4; 7], VoteMode::Weighted));
         let s = schedule("-style a -guide b c -compat -vote weighted -stopmask on", Engine::Cpu);
         assert_eq!((s.vote_mode, s.use_stop_threshold, s.patch_match_iters), (VoteMode::Weighted, true, vec![4; 7]));
+        // The search follows the preset unless -search is given.
+        assert_eq!(schedule("-style a -guide b c", Engine::Gpu).search, SearchMode::Improved);
+        assert_eq!(schedule("-style a -guide b c -compat", Engine::Gpu).search, SearchMode::Compat);
+        assert_eq!(schedule("-style a -guide b c -search compat", Engine::Cpu).search, SearchMode::Compat);
+        assert_eq!(schedule("-style a -guide b c -compat -search improved", Engine::Cpu).search, SearchMode::Improved);
         // -bitexact implies compat unless a preset is named, and always truncates.
         let o = parse_args(&args("-style a -guide b c -bitexact")).ok().unwrap();
         assert_eq!(o.preset(), Preset::Compat);
@@ -693,6 +717,8 @@ mod tests {
             "-style",
             "-frobnicate",
             "-preset turbo",
+            "-search kd",
+            "-search",
             "-preset",
             "-vote median",
             "-stopmask yes",

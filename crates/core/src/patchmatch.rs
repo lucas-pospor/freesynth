@@ -574,7 +574,12 @@ fn scan_band<O: OmegaAccess, const K: u8>(
                         try_patch::<O, K>(sp, scan, omega, x, y, n, &mut cur);
                     }
                 }
-                // Random search around the post-propagation match, smallest radius first.
+                // Random search around the post-propagation match, smallest radius first. The
+                // window [pix0 - rad, pix0 + rad) is the original's and never reaches
+                // pix0 + rad. A symmetric window lowers the patch error slightly with plain
+                // votes but gives less coherent, less sharp fields; with weighted votes it helps
+                // some images, hurts others and changes nothing on average. So the original's
+                // is kept in every preset.
                 let mut seed = randi(((x | (y << 11)) as u32) ^ iter_seed);
                 let pix0 = cur.n;
                 for &rad in scan.radii.iter().rev() {

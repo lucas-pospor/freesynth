@@ -5,10 +5,18 @@
 //! [`Params`] as the CPU engine in `freesynth-core`.
 //!
 //! The algorithm is the CUDA engine's: a coarse-to-fine pyramid where every level alternates
-//! parallel PatchMatch (jump-flood-like propagation at offsets 4, 2, 1 followed by random search
-//! at radii 1, 2, 4, ...) with patch voting. Every target pixel is processed by its own GPU
-//! thread; the uniformity term's occupancy map is shared through atomics, so (like the original)
-//! results vary slightly from run to run.
+//! parallel PatchMatch with patch voting. Every target pixel is processed by its own GPU thread;
+//! the uniformity term's occupancy map is shared through atomics, so (like the original) results
+//! vary slightly from run to run. Two PatchMatch variants are available
+//! ([`SearchMode`](freesynth_core::SearchMode)):
+//! - the compat search (the CUDA engine's): jump-flood-like propagation at offsets 4, 2, 1,
+//!   followed by random search at radii 1, 2, 4, ... below half the source size;
+//! - the improved search (every preset except compat): two checkerboard (red-black) half-passes
+//!   per PatchMatch iteration, in which half of the pixels try their four direct neighbours'
+//!   matches and then do their random search. The neighbours have the other colour, so they are
+//!   stable during the pass and carry the other half-pass's fresh results, random search
+//!   included (Gauss-Seidel instead of Jacobi). It reaches the same patch error with a third of
+//!   the propagation work and half the dispatches.
 //!
 //! Differences from the CUDA engine, chosen for consistency with the CPU engine:
 //! - The initial random field comes from the same generator as the CPU engine (glibc `rand()`
@@ -240,8 +248,8 @@ pub fn synthesize(input: &SynthesisInput, params: &Params) -> Result<SynthesisOu
 #[cfg(test)]
 mod tests {
     use freesynth_core::{
-        GlibcRand, Image, Params, PerLevel, Preset, SynthesisInput, VoteMode, VoteRounding, nnf_init_random,
-        nnf_patch_errors, vote_plain,
+        GlibcRand, Image, Params, PerLevel, Preset, SearchMode, SynthesisInput, VoteMode, VoteRounding,
+        nnf_init_random, nnf_patch_errors, vote_plain,
     };
 
     use super::*;
@@ -310,6 +318,62 @@ mod tests {
         assert_eq!((out.nnf.width(), out.nnf.height()), (96, 80));
         let p = psnr(&out.image, &img);
         assert!(p > 35.0, "PSNR {p:.2} dB");
+    }
+
+    /// Without the uniformity term, a target equal to the source has the identity field as its
+    /// exact solution. Both search variants must find it nearly everywhere in the interior (the
+    /// edge rows and columns are covered by `every_pixel_is_searched`).
+    #[test]
+    fn both_search_modes_find_the_identity_field() {
+        let Some(ctx) = context() else { return };
+        let (w, h) = (75, 61);
+        let input = identity_input(&test_image(w, h, 0.0));
+        for search in [SearchMode::Compat, SearchMode::Improved] {
+            let params = Params { uniformity_weight: 0.0, search: Some(search), ..Params::default() };
+            let out = ctx.synthesize(&input, &params).unwrap();
+            let interior: Vec<(usize, usize)> = (2..h - 2).flat_map(|y| (2..w - 2).map(move |x| (x, y))).collect();
+            let exact = interior.iter().filter(|&&(x, y)| out.nnf.get(x, y) == [x as i32, y as i32]).count();
+            assert!(exact * 100 >= interior.len() * 98, "{search}: {exact} of {} interior pixels", interior.len());
+        }
+    }
+
+    /// Every pixel, the first and last row and column included, takes part in the search: after
+    /// one level with a single search/vote and PatchMatch iteration, almost no pixel may still
+    /// hold its random initial match. The sizes leave partial workgroups in both directions,
+    /// an unpaired last column in the checkerboard half-passes, and rows of odd length.
+    #[test]
+    fn every_pixel_is_searched() {
+        let Some(ctx) = context() else { return };
+        for (w, h, patch_size) in [(75, 61, 5), (16, 17, 5), (33, 9, 3), (31, 47, 7)] {
+            let input = identity_input(&test_image(w, h, 0.0));
+            for search in [SearchMode::Compat, SearchMode::Improved] {
+                let params = Params {
+                    patch_size,
+                    uniformity_weight: 0.0,
+                    num_pyramid_levels: Some(1),
+                    search_vote_iters: Some(PerLevel::Uniform(1)),
+                    patch_match_iters: Some(PerLevel::Uniform(1)),
+                    search: Some(search),
+                    ..Params::default()
+                };
+                let out = ctx.synthesize(&input, &params).unwrap();
+                let init = nnf_init_random((w, h), (w, h), patch_size, &mut GlibcRand::new(params.seed));
+                let kept = |x: usize, y: usize| out.nnf.get(x, y) == init.get(x, y);
+                // A pixel the search skipped keeps its initial match; a searched one rarely does
+                // (at most 13% of a row or column, 3% of all pixels at these sizes).
+                let case = format!("{w}x{h}, patch {patch_size}, {search} search");
+                for x in 0..w {
+                    let n = (0..h).filter(|&y| kept(x, y)).count();
+                    assert!(4 * n <= h, "{case}: column {x} kept {n} of {h} initial matches");
+                }
+                for y in 0..h {
+                    let n = (0..w).filter(|&x| kept(x, y)).count();
+                    assert!(4 * n <= w, "{case}: row {y} kept {n} of {w} initial matches");
+                }
+                let total = (0..h).flat_map(|y| (0..w).map(move |x| (x, y))).filter(|&(x, y)| kept(x, y)).count();
+                assert!(20 * total <= w * h, "{case}: {total} of {} initial matches kept", w * h);
+            }
+        }
     }
 
     #[test]
@@ -516,8 +580,8 @@ mod tests {
         assert_eq!(counts[1], 1);
         assert!(counts[0] > 100, "{counts:?}");
 
-        for extra_pass_3x3 in [false, true] {
-            let params = Params { uniformity_weight: 0.0, extra_pass_3x3, ..Params::default() };
+        for (search, extra_pass_3x3) in [(SearchMode::Improved, false), (SearchMode::Improved, true), (SearchMode::Compat, false)] {
+            let params = Params { uniformity_weight: 0.0, extra_pass_3x3, search: Some(search), ..Params::default() };
             let mut outputs = Vec::new();
             for budget in [u64::MAX, 1, 2_000_000] {
                 ctx.submission_budget = budget;
@@ -526,8 +590,9 @@ mod tests {
             }
             let (_, _, reference) = &outputs[0];
             for (budget, submissions, out) in &outputs[1..] {
-                assert_eq!(out.nnf, reference.nnf, "budget {budget} ({submissions} submissions), extra pass {extra_pass_3x3}");
-                assert_eq!(out.image, reference.image, "budget {budget} ({submissions} submissions), extra pass {extra_pass_3x3}");
+                let case = format!("budget {budget} ({submissions} submissions), {search} search, extra pass {extra_pass_3x3}");
+                assert_eq!(out.nnf, reference.nnf, "{case}");
+                assert_eq!(out.image, reference.image, "{case}");
             }
             let n: Vec<usize> = outputs.iter().map(|o| o.1).collect();
             assert!(n[0] < n[2] && n[2] < n[1], "submissions per budget: {n:?}");

@@ -16,20 +16,19 @@ use crate::vote::VoteRounding;
 /// A named trade-off between speed and quality. See [`Params::preset`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Preset {
-    /// The 2019 ebsynth schedule and voting: 4 PatchMatch iterations per search/vote iteration,
-    /// plain voting with truncation, no stop mask.
+    /// The 2019 ebsynth schedule, voting and search: 4 PatchMatch iterations per search/vote
+    /// iteration, plain voting with truncation, no stop mask, [`SearchMode::Compat`].
     Compat,
     /// Roughly twice as fast as [`Compat`](Preset::Compat) at about the same quality: 2
     /// PatchMatch iterations per search/vote iteration (4 with 3x3 patches, which need them),
-    /// weighted voting, rounding.
+    /// weighted voting, rounding, [`SearchMode::Improved`].
     #[default]
     Default,
-    /// [`Default`](Preset::Default) plus the stop-threshold mask, and on the GPU 4 and 3
-    /// search/vote iterations at the two finest levels. Faster, with a few percent higher patch
-    /// error.
+    /// [`Default`](Preset::Default) plus the stop-threshold mask, and on the GPU 4 search/vote
+    /// iterations at the finest level. Faster, with a few percent higher patch error.
     Fast,
     /// The full [`Compat`](Preset::Compat) schedule (4 PatchMatch iterations) with weighted
-    /// voting and rounding.
+    /// voting, rounding and [`SearchMode::Improved`].
     High,
 }
 
@@ -65,6 +64,54 @@ impl FromStr for Preset {
     }
 }
 
+/// The PatchMatch variant a GPU engine runs. See [`Params::search`].
+///
+/// Both variants use the same objective (patch error plus the uniformity term), the same
+/// acceptance rule, the same random-search radii and the same per-level schedule; they differ in
+/// how matches propagate between neighbouring pixels. The CPU engine has a single search (the
+/// 2019 scan-line PatchMatch) and runs it for both values.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum SearchMode {
+    /// The 2019 CUDA engine's search, used by [`Preset::Compat`]: per PatchMatch iteration,
+    /// three propagation passes at offsets 4, 2 and 1 in which every pixel tries the matches its
+    /// four neighbours had before the pass, then a random-search pass.
+    Compat,
+    /// FreeSynth's search, used by every other preset: per PatchMatch iteration, two
+    /// checkerboard (red-black) half-passes. In each, half of the pixels try their four direct
+    /// neighbours' matches, which the other half-pass has just updated, and then do their random
+    /// search. About the same patch error as [`Compat`](SearchMode::Compat) with a third of the
+    /// propagation work.
+    #[default]
+    Improved,
+}
+
+impl SearchMode {
+    /// The lower-case name, as accepted by [`FromStr`].
+    pub fn name(self) -> &'static str {
+        match self {
+            SearchMode::Compat => "compat",
+            SearchMode::Improved => "improved",
+        }
+    }
+}
+
+impl fmt::Display for SearchMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+impl FromStr for SearchMode {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self, Error> {
+        [SearchMode::Compat, SearchMode::Improved]
+            .into_iter()
+            .find(|m| m.name() == s)
+            .ok_or_else(|| Error::InvalidInput(format!("unknown search mode '{s}' (expected compat or improved)")))
+    }
+}
+
 /// The engine a [`Schedule`] is resolved for. Some presets differ between engines because the
 /// engines' costs differ (see [`Preset::Fast`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -79,9 +126,10 @@ pub enum Engine {
 /// number of pyramid levels. Per-level vectors are indexed coarsest level first.
 ///
 /// A schedule is resolved for one [`Engine`]. Only [`Preset::Fast`] differs between engines
-/// (fewer search/vote iterations at the finest levels on the GPU), so the same `Params` run with
+/// (4 search/vote iterations at the finest level on the GPU), so the same `Params` run with
 /// `Fast` give different results if a pipeline falls back from the GPU to the CPU. Set
-/// [`Params::search_vote_iters`] explicitly to get the same schedule on both.
+/// [`Params::search_vote_iters`] explicitly to get the same schedule on both. The CPU engine
+/// ignores [`search`](Self::search).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Schedule {
     /// Number of pyramid levels that will be run.
@@ -98,6 +146,8 @@ pub struct Schedule {
     pub vote_mode: VoteMode,
     /// How votes are converted to 8 bits.
     pub vote_rounding: VoteRounding,
+    /// Which PatchMatch variant runs.
+    pub search: SearchMode,
 }
 
 impl Params {
@@ -158,9 +208,10 @@ impl Params {
             None => {
                 let mut v = vec![6; num_levels];
                 if preset == Preset::Fast && engine == Engine::Gpu {
-                    // The two finest levels converge in fewer iterations; they also cost the most.
-                    for (level, iters) in v.iter_mut().rev().zip([3, 4]) {
-                        *level = iters;
+                    // The finest level converges in fewer iterations and costs the most. Cutting
+                    // the next level too (to 4 and 3) saves little more and costs patch error.
+                    if let Some(finest) = v.last_mut() {
+                        *finest = 4;
                     }
                 }
                 v
@@ -190,6 +241,7 @@ impl Params {
             use_stop_threshold: self.use_stop_threshold.unwrap_or(preset == Preset::Fast),
             vote_mode: self.vote_mode.unwrap_or(if tuned { VoteMode::Weighted } else { VoteMode::Plain }),
             vote_rounding: self.vote_rounding.unwrap_or(if tuned { VoteRounding::Nearest } else { VoteRounding::Truncate }),
+            search: self.search.unwrap_or(if tuned { SearchMode::Improved } else { SearchMode::Compat }),
         })
     }
 }
@@ -218,6 +270,7 @@ mod tests {
         assert_eq!(compat.patch_match_iters, [4; 5]);
         assert!(!compat.use_stop_threshold);
         assert_eq!((compat.vote_mode, compat.vote_rounding), (VoteMode::Plain, VoteRounding::Truncate));
+        assert_eq!(compat.search, SearchMode::Compat);
         assert_eq!(s(&Params::compat(), Engine::Gpu), compat);
 
         let high = s(&Params::with_preset(Preset::High), Engine::Gpu);
@@ -230,15 +283,16 @@ mod tests {
         assert_eq!(default.search_vote_iters, [6; 5]);
         assert!(!default.use_stop_threshold);
         assert_eq!(default.vote_mode, VoteMode::Weighted);
+        assert_eq!(default.search, SearchMode::Improved);
         assert_eq!(s(&Params::default(), Engine::Gpu), default);
 
         let fast = Params::with_preset(Preset::Fast);
         let (cpu, gpu) = (s(&fast, Engine::Cpu), s(&fast, Engine::Gpu));
         assert!(cpu.use_stop_threshold && gpu.use_stop_threshold);
         assert_eq!(cpu.search_vote_iters, [6; 5]);
-        assert_eq!(gpu.search_vote_iters, [6, 6, 6, 4, 3]);
+        assert_eq!(gpu.search_vote_iters, [6, 6, 6, 6, 4]);
         assert_eq!(gpu.patch_match_iters, [2; 5]);
-        assert_eq!(fast.schedule_for_levels(1, Engine::Gpu).unwrap().search_vote_iters, [3]);
+        assert_eq!(fast.schedule_for_levels(1, Engine::Gpu).unwrap().search_vote_iters, [4]);
     }
 
     #[test]
@@ -267,6 +321,10 @@ mod tests {
 
         let compat_weighted = Params { vote_mode: Some(VoteMode::Weighted), ..Params::compat() };
         assert_eq!(compat_weighted.schedule_for_levels(2, Engine::Cpu).unwrap().vote_mode, VoteMode::Weighted);
+        let compat_search = Params { search: Some(SearchMode::Compat), ..Params::default() };
+        assert_eq!(compat_search.schedule_for_levels(2, Engine::Gpu).unwrap().search, SearchMode::Compat);
+        let improved = Params { search: Some(SearchMode::Improved), ..Params::compat() };
+        assert_eq!(improved.schedule_for_levels(2, Engine::Cpu).unwrap().search, SearchMode::Improved);
     }
 
     #[test]
@@ -299,5 +357,9 @@ mod tests {
             assert_eq!(p.to_string(), p.name());
         }
         assert!("turbo".parse::<Preset>().is_err());
+        for m in [SearchMode::Compat, SearchMode::Improved] {
+            assert_eq!(m.name().parse::<SearchMode>().unwrap(), m);
+        }
+        assert!("kd".parse::<SearchMode>().is_err());
     }
 }

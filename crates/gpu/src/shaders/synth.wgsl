@@ -22,7 +22,10 @@ const USE_TILE: bool = {{USE_TILE}};
 
 const PATCH: i32 = 2 * R + 1;
 // Target tile: the workgroup's pixels plus an R-pixel apron, with every word a patch error
-// reads from the target side (style, guide, modulation).
+// reads from the target side (style, guide, modulation). The checkerboard kernel's workgroups
+// cover 2 WG x WG pixels and use a (2 WG + 2R) x TILE tile; its pipelines are built from a module
+// of their own whose TILE_LEN (and USE_TILE) is sized for that tile, the other kernels' from one
+// sized for TILE x TILE.
 const TILE: i32 = i32(WG) + 2 * R;
 const TILE_WORDS: u32 = STYLE_W + GUIDE_W + select(0u, GUIDE_W, MODULATED);
 const TILE_LEN: u32 = {{TILE_LEN}}u;
@@ -30,6 +33,8 @@ const FLT_MAX: f32 = 3.40282347e+38;
 
 // Offset of the propagation pass (4, 2 or 1 in the CUDA engine); one pipeline per value.
 override PROP_R: i32 = 1;
+// Colour of the pixels a checkerboard half-pass updates: those with (x + y) % 2 == CB_COLOR.
+override CB_COLOR: u32 = 0u;
 
 struct Params {
     tw: i32, th: i32,           // target (level) size
@@ -101,16 +106,17 @@ fn target_pixel(gid: vec3<u32>) -> vec2<i32> {
 var<workgroup> tile: array<u32, TILE_LEN>;
 /// Tile index of the top-left pixel of the current invocation's target patch.
 var<private> tile_base: u32;
+/// Pixels per tile row.
+var<private> tile_stride: u32;
 
-/// Fills `tile` with the (clamped) target pixels around the workgroup and records the
-/// invocation's patch position. Must be called in uniform control flow by every invocation.
-fn load_tile(wid: vec3<u32>, lid: vec3<u32>) {
-    if (!USE_TILE) { return; }
-    let origin = vec2<i32>(wid.xy * WG) - vec2<i32>(R, R);
-    for (var k = lid.y * WG + lid.x; k < u32(TILE * TILE) * TILE_WORDS; k += WG * WG) {
+/// Fills `tile` with the (clamped) target pixels of the `size` rectangle whose top-left pixel is
+/// `origin`. Must be called in uniform control flow by every invocation.
+fn load_tile_rect(origin: vec2<i32>, size: vec2<i32>, lid: vec3<u32>) {
+    tile_stride = u32(size.x);
+    for (var k = lid.y * WG + lid.x; k < u32(size.x * size.y) * TILE_WORDS; k += WG * WG) {
         let p = i32(k / TILE_WORDS);
         let w = k % TILE_WORDS;
-        let g = clamp(origin + vec2<i32>(p % TILE, p / TILE), vec2<i32>(0, 0), vec2<i32>(P.tw - 1, P.th - 1));
+        let g = clamp(origin + vec2<i32>(p % size.x, p / size.x), vec2<i32>(0, 0), vec2<i32>(P.tw - 1, P.th - 1));
         let gi = u32(g.y * P.tw + g.x);
         var v: u32;
         if (w < STYLE_W) {
@@ -122,8 +128,15 @@ fn load_tile(wid: vec3<u32>, lid: vec3<u32>) {
         }
         tile[k] = v;
     }
-    tile_base = lid.y * u32(TILE) + lid.x;
     workgroupBarrier();
+}
+
+/// Fills `tile` with the (clamped) target pixels around the workgroup and records the
+/// invocation's patch position. Must be called in uniform control flow by every invocation.
+fn load_tile(wid: vec3<u32>, lid: vec3<u32>) {
+    if (!USE_TILE) { return; }
+    load_tile_rect(vec2<i32>(wid.xy * WG) - vec2<i32>(R, R), vec2<i32>(TILE, TILE), lid);
+    tile_base = lid.y * u32(TILE) + lid.x;
 }
 
 /// Error between target pixel `ti` (tile index) and source pixel `si`.
@@ -180,7 +193,7 @@ fn patch_error(t: vec2<i32>, s: vec2<i32>, ebest: f32) -> f32 {
             if (e > ebest) {
                 return e;
             }
-            ti += u32(TILE);
+            ti += tile_stride;
             si += u32(P.sw);
         }
         return e;
@@ -330,9 +343,18 @@ fn try_random(t: vec2<i32>, r: i32, b: ptr<function, Best>, state: ptr<function,
     try_patch(t, vec2<i32>(nx, ny), b);
 }
 
-/// `krnlRandomSearchPass` for all radii 1, 2, 4, ... < max(sw, sh) / 2 in one dispatch (the
-/// CUDA engine issued one dispatch per radius; each radius is still centred on the best match
-/// found so far). Updates `nnf_cur` in place.
+/// Random search of one pixel at radii 1, 2, 4, ... < max(sw, sh) / 2, each centred on the best
+/// match found so far.
+fn random_search_pixel(t: vec2<i32>, b: ptr<function, Best>, state: ptr<function, u32>) {
+    let max_r = max(P.sw, P.sh) / 2;
+    for (var r = 1; r < max_r; r *= 2) {
+        try_random(t, r, b, state);
+    }
+}
+
+/// `krnlRandomSearchPass` for all radii in one dispatch (the CUDA engine issued one dispatch per
+/// radius; each radius is still centred on the best match found so far). Updates `nnf_cur` in
+/// place. Used by the compat search.
 @compute @workgroup_size(WG, WG)
 fn random_search(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(workgroup_id) wid: vec3<u32>,
                  @builtin(local_invocation_id) lid: vec3<u32>) {
@@ -343,10 +365,40 @@ fn random_search(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(workgro
     if (mask[i] != 0u) { return; }
     var b = Best(nnf_cur[i], err[i], 0.0, false);
     var state = rng[i];
-    let max_r = max(P.sw, P.sh) / 2;
-    for (var r = 1; r < max_r; r *= 2) {
-        try_random(t, r, &b, &state);
+    random_search_pixel(t, &b, &state);
+    rng[i] = state;
+    err[i] = b.e;
+    nnf_cur[i] = b.n;
+}
+
+/// One checkerboard (red-black) half-pass of the improved search. The pixels of colour CB_COLOR
+/// try the matches of their four direct neighbours, which all have the other colour and so stay
+/// fixed during this pass (and were just updated by the previous one), then do their random
+/// search. Updates `nnf_cur` in place.
+///
+/// Each workgroup covers 2 WG x WG pixels and each invocation takes the pixel of its row pair
+/// that has the pass colour, so the grid is (ceil(tw / 2), th) invocations.
+@compute @workgroup_size(WG, WG)
+fn checkerboard(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
+    let x0 = 2 * i32(wid.x * WG);
+    let y0 = i32(wid.y * WG);
+    if (USE_TILE) {
+        load_tile_rect(vec2<i32>(x0 - R, y0 - R), vec2<i32>(2 * i32(WG) + 2 * R, TILE), lid);
     }
+    let y = y0 + i32(lid.y);
+    let x = x0 + 2 * i32(lid.x) + ((y + i32(CB_COLOR)) & 1);
+    tile_base = lid.y * tile_stride + u32(x - x0);
+    if (x >= P.tw || y >= P.th) { return; }
+    let t = vec2<i32>(x, y);
+    let i = y * P.tw + x;
+    if (mask[i] != 0u) { return; }
+    var b = Best(nnf_cur[i], err[i], 0.0, false);
+    try_neighbor(t, vec2<i32>(-1, 0), &b);
+    try_neighbor(t, vec2<i32>(1, 0), &b);
+    try_neighbor(t, vec2<i32>(0, -1), &b);
+    try_neighbor(t, vec2<i32>(0, 1), &b);
+    var state = rng[i];
+    random_search_pixel(t, &b, &state);
     rng[i] = state;
     err[i] = b.e;
     nnf_cur[i] = b.n;

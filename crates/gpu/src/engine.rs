@@ -13,8 +13,8 @@ use std::sync::{Arc, mpsc};
 use std::time::Instant;
 
 use freesynth_core::{
-    Engine, GlibcRand, Image, Nnf, Params, Schedule, SynthesisInput, SynthesisOutput, VoteMode, VoteRounding,
-    nnf_init_random, pyramid_level_size,
+    Engine, GlibcRand, Image, Nnf, Params, Schedule, SearchMode, SynthesisInput, SynthesisOutput, VoteMode,
+    VoteRounding, nnf_init_random, pyramid_level_size,
 };
 use wgpu::util::DeviceExt;
 
@@ -25,7 +25,7 @@ use crate::error::GpuError;
 const WG: u32 = 8;
 /// Workgroup edge length of the resampling kernel (fixed in `resample.wgsl`).
 const RESAMPLE_WG: u32 = 16;
-/// Propagation offsets of one PatchMatch iteration, as in the CUDA engine.
+/// Propagation offsets of one PatchMatch iteration of the compat search, as in the CUDA engine.
 const PROP_RADII: [i32; 3] = [4, 2, 1];
 
 const SYNTH_TEMPLATE: &str = include_str!("shaders/synth.wgsl");
@@ -258,6 +258,8 @@ struct Kernels {
     eval_error: wgpu::ComputePipeline,
     propagate: Vec<wgpu::ComputePipeline>,
     random_search: wgpu::ComputePipeline,
+    /// The two half-passes (colours 0 and 1) of the improved search.
+    checkerboard: [wgpu::ComputePipeline; 2],
     vote_plain: wgpu::ComputePipeline,
     vote_weighted: wgpu::ComputePipeline,
     eval_mask: wgpu::ComputePipeline,
@@ -269,17 +271,31 @@ struct Kernels {
     init_rng: wgpu::ComputePipeline,
 }
 
-/// Number of u32 words of the target tile cached in workgroup memory (see `load_tile` in
-/// `synth.wgsl`).
-fn tile_len(layout: Layout, patch_size: usize) -> usize {
-    let side = WG as usize + 2 * (patch_size / 2);
-    side * side * (layout.style_w + layout.guide_w * (1 + layout.modulated as usize))
+/// Shape of the target tile a shader module caches in workgroup memory (see `load_tile_rect` in
+/// `synth.wgsl`). The checkerboard kernel gets a module of its own, so its wider tile neither
+/// takes workgroup memory from the other kernels nor makes them fall back to global reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TileShape {
+    /// (WG + 2R)^2 pixels: every kernel except `checkerboard`.
+    Square,
+    /// (2 WG + 2R) x (WG + 2R) pixels: `checkerboard`, whose workgroups cover 2 WG x WG pixels.
+    Checkerboard,
+}
+
+/// Number of u32 words of a target tile of the given shape.
+fn tile_len(layout: Layout, patch_size: usize, shape: TileShape) -> usize {
+    let apron = 2 * (patch_size / 2);
+    let width = match shape {
+        TileShape::Square => WG as usize,
+        TileShape::Checkerboard => 2 * WG as usize,
+    } + apron;
+    width * (WG as usize + apron) * (layout.style_w + layout.guide_w * (1 + layout.modulated as usize))
 }
 
 /// Substitutes the template constants of `synth.wgsl`. The target tile is used when it fits
 /// into `workgroup_storage` bytes.
-fn synth_source(layout: Layout, patch_size: usize, workgroup_storage: usize) -> String {
-    let tile = tile_len(layout, patch_size);
+fn synth_source(layout: Layout, patch_size: usize, shape: TileShape, workgroup_storage: usize) -> String {
+    let tile = tile_len(layout, patch_size, shape);
     let use_tile = tile * 4 <= workgroup_storage;
     SYNTH_TEMPLATE
         .replace("{{STYLE_W}}", &layout.style_w.to_string())
@@ -293,17 +309,19 @@ fn synth_source(layout: Layout, patch_size: usize, workgroup_storage: usize) -> 
 
 impl Kernels {
     fn new(device: &wgpu::Device, pipeline_layout: &wgpu::PipelineLayout, layout: Layout, patch_size: usize) -> Self {
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("freesynth synth"),
-            source: wgpu::ShaderSource::Wgsl(
-                synth_source(layout, patch_size, device.limits().max_compute_workgroup_storage_size as usize).into(),
-            ),
-        });
-        let make = |entry: &str, constants: &[(&str, f64)]| {
+        let storage = device.limits().max_compute_workgroup_storage_size as usize;
+        let module = |shape: TileShape| {
+            device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("freesynth synth"),
+                source: wgpu::ShaderSource::Wgsl(synth_source(layout, patch_size, shape, storage).into()),
+            })
+        };
+        let (square, wide) = (module(TileShape::Square), module(TileShape::Checkerboard));
+        let make_in = |module: &wgpu::ShaderModule, entry: &str, constants: &[(&str, f64)]| {
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some(entry),
                 layout: Some(pipeline_layout),
-                module: &module,
+                module,
                 entry_point: Some(entry),
                 compilation_options: wgpu::PipelineCompilationOptions {
                     constants,
@@ -312,10 +330,12 @@ impl Kernels {
                 cache: None,
             })
         };
+        let make = |entry: &str, constants: &[(&str, f64)]| make_in(&square, entry, constants);
         Self {
             eval_error: make("eval_error", &[]),
             propagate: PROP_RADII.iter().map(|&r| make("propagate", &[("PROP_R", r as f64)])).collect(),
             random_search: make("random_search", &[]),
+            checkerboard: [0.0, 1.0].map(|colour| make_in(&wide, "checkerboard", &[("CB_COLOR", colour)])),
             vote_plain: make("vote_plain", &[]),
             vote_weighted: make("vote_weighted", &[]),
             eval_mask: make("eval_mask", &[]),
@@ -692,14 +712,25 @@ fn run(ctx: &GpuContext, input: &SynthesisInput, params: &Params, sched: &Schedu
         let radii = (ssz.0.max(ssz.1) / 2).max(1).next_power_of_two().trailing_zeros() as u64;
         let num_sv = sched.search_vote_iters[ph.level];
         let num_pm = sched.patch_match_iters[ph.level];
+        // A checkerboard half-pass covers every other pixel: 4 neighbours and the radii each.
+        let half = (tsz.0.div_ceil(2), tsz.1);
         for vote_iter in 0..num_sv {
             sub.dispatch(&k.eval_error, &groups[cs][cn], off, tsz, cost.patches(tsz, p, 1));
             for _ in 0..num_pm {
-                for prop in &k.propagate {
-                    sub.dispatch(prop, &groups[cs][cn], off, tsz, cost.patches(tsz, p, 4));
-                    cn ^= 1;
+                match sched.search {
+                    SearchMode::Compat => {
+                        for prop in &k.propagate {
+                            sub.dispatch(prop, &groups[cs][cn], off, tsz, cost.patches(tsz, p, 4));
+                            cn ^= 1;
+                        }
+                        sub.dispatch(&k.random_search, &groups[cs][cn], off, tsz, cost.patches(tsz, p, radii));
+                    }
+                    SearchMode::Improved => {
+                        for pass in &k.checkerboard {
+                            sub.dispatch(pass, &groups[cs][cn], off, half, cost.patches(half, p, 4 + radii));
+                        }
+                    }
                 }
-                sub.dispatch(&k.random_search, &groups[cs][cn], off, tsz, cost.patches(tsz, p, radii));
             }
             let vote = match sched.vote_mode {
                 VoteMode::Plain => &k.vote_plain,
@@ -847,11 +878,24 @@ mod tests {
     #[test]
     fn shader_template_is_fully_substituted() {
         let layout = Layout { style_w: 2, guide_w: 6, modulated: true };
-        let src = synth_source(layout, 7, 1 << 20);
+        let src = synth_source(layout, 7, TileShape::Square, 1 << 20);
         assert!(src.contains("const USE_TILE: bool = true;"));
-        assert!(src.contains(&format!("const TILE_LEN: u32 = {}u;", tile_len(layout, 7))));
-        assert!(synth_source(layout, 7, 1024).contains("const USE_TILE: bool = false;"));
+        assert!(src.contains(&format!("const TILE_LEN: u32 = {}u;", tile_len(layout, 7, TileShape::Square))));
+        assert!(synth_source(layout, 7, TileShape::Square, 1024).contains("const USE_TILE: bool = false;"));
         assert!(!src.contains("{{"), "unsubstituted placeholder");
         assert!(src.contains("const R: i32 = 3;") && src.contains("const MODULATED: bool = true;"));
+    }
+
+    #[test]
+    fn checkerboard_tile_does_not_change_the_square_one() {
+        // 2 style + 6 guide words + 6 modulation words per pixel, 7 x 7 patches.
+        let layout = Layout { style_w: 2, guide_w: 6, modulated: true };
+        assert_eq!(tile_len(layout, 7, TileShape::Square), 14 * 14 * 14);
+        assert_eq!(tile_len(layout, 7, TileShape::Checkerboard), 22 * 14 * 14);
+        // A layout whose square tile fits 16 KiB but whose checkerboard tile does not: only the
+        // checkerboard module falls back to global reads.
+        let layout = Layout { style_w: 3, guide_w: 12, modulated: false };
+        let fits = |shape| synth_source(layout, 7, shape, 16384).contains("const USE_TILE: bool = true;");
+        assert!(fits(TileShape::Square) && !fits(TileShape::Checkerboard));
     }
 }
