@@ -7,7 +7,8 @@ use std::sync::{Arc, Mutex};
 use rayon::prelude::*;
 
 use crate::error::{Error, invalid};
-use crate::image::{Image, Nnf};
+use crate::extras::{SynthesisExtras, warm_field};
+use crate::image::{Image, Image16, Nnf};
 use crate::io::{eval_num_channels, select_channels};
 use crate::mask::{ACTIVE, dilate_mask, eval_mask};
 use crate::nnf::{nnf_init_random, nnf_upscale};
@@ -16,7 +17,7 @@ use crate::patchmatch::{OmegaWorkspace, PatchMatchConfig, nnf_errors, patchmatch
 use crate::pyramid::{pyramid_level_size, resample};
 use crate::rng::GlibcRand;
 use crate::schedule::{Engine, Preset, SearchMode};
-use crate::vote::{VoteRounding, vote_plain, vote_weighted};
+use crate::vote::{VoteRounding, vote_plain, vote_plain16, vote_weighted, vote_weighted16};
 use crate::{MAX_GUIDE_CHANNELS, MAX_STYLE_CHANNELS};
 
 /// How patches are blended into the output.
@@ -331,6 +332,9 @@ pub struct SynthesisOutput {
     /// final field points at. The patch size is 3 after [`Params::extra_pass_3x3`]. `None`
     /// when not requested. The map has the size of [`image`](Self::image).
     pub errors: Option<Vec<f32>>,
+    /// With [`SynthesisExtras::style16`], the final field voted from the 16-bit style with the
+    /// final vote's weights: the 16-bit counterpart of [`image`](Self::image). `None` otherwise.
+    pub image16: Option<Image16>,
 }
 
 /// Per-level images.
@@ -397,11 +401,42 @@ impl<'a> Level<'a> {
 /// coarsest level and then, at every level, alternates PatchMatch searches and votes; the field is
 /// upscaled between levels. Returns the synthesised image and the final field.
 pub fn synthesize(input: &SynthesisInput, params: &Params) -> Result<SynthesisOutput, Error> {
+    synthesize_with(input, params, &SynthesisExtras::default())
+}
+
+/// [`synthesize`] with optional extra inputs: a warm start and a 16-bit style
+/// ([`SynthesisExtras`]).
+pub fn synthesize_with(
+    input: &SynthesisInput,
+    params: &Params,
+    extras: &SynthesisExtras,
+) -> Result<SynthesisOutput, Error> {
     match params.num_threads {
         Some(n) if n.max(1) != rayon::current_num_threads() => {
-            thread_pool(n.max(1))?.install(|| synthesize_here(input, params))
+            thread_pool(n.max(1))?.install(|| synthesize_here(input, params, extras))
         }
-        _ => synthesize_here(input, params),
+        _ => synthesize_here(input, params, extras),
+    }
+}
+
+impl SynthesisExtras {
+    /// Checks the extras against the input they go with.
+    pub fn validate(&self, input: &SynthesisInput) -> Result<(), Error> {
+        let target = input.target_guide.size();
+        if let Some(w) = &self.warm_start {
+            if (w.nnf.width(), w.nnf.height()) != target {
+                return invalid("the warm-start field must have the target's size");
+            }
+            if w.levels == 0 {
+                return invalid("a warm start must run at least one pyramid level");
+            }
+        }
+        if let Some(s) = &self.style16
+            && (s.size() != input.source_style.size() || s.channels() != input.source_style.channels())
+        {
+            return invalid("the 16-bit style must have the source style's size and channels");
+        }
+        Ok(())
     }
 }
 
@@ -426,9 +461,15 @@ fn thread_pool(n: usize) -> Result<Arc<rayon::ThreadPool>, Error> {
 }
 
 /// [`synthesize`] on the current rayon thread pool.
-fn synthesize_here(input: &SynthesisInput, params: &Params) -> Result<SynthesisOutput, Error> {
+fn synthesize_here(
+    input: &SynthesisInput,
+    params: &Params,
+    extras: &SynthesisExtras,
+) -> Result<SynthesisOutput, Error> {
     let sched = params.schedule(input, Engine::Cpu)?;
+    extras.validate(input)?;
     let num_levels = sched.num_levels;
+    let first_level = extras.warm_start.as_ref().map_or(0, |w| num_levels.saturating_sub(w.levels));
     let rounding = sched.vote_rounding;
 
     let bands = params.num_bands.unwrap_or_else(rayon::current_num_threads).max(1);
@@ -447,14 +488,18 @@ fn synthesize_here(input: &SynthesisInput, params: &Params) -> Result<SynthesisO
     let mut omega_ws = OmegaWorkspace::default();
     let mut level_data: Option<Level<'_>> = None;
 
-    let mut level = 0;
+    // Whether the latest vote of the current level was weighted (with `errors`).
+    let mut weighted_vote;
+    let mut level = first_level;
     loop {
         if !in_extra_pass {
             let lv = Level::build(input, num_levels, level);
-            nnf = if level > 0 {
-                nnf_upscale(&nnf, patch_size, lv.target_size, lv.source_size)
-            } else {
-                nnf_init_random(lv.target_size, lv.source_size, patch_size, &mut rng)
+            nnf = match &extras.warm_start {
+                Some(w) if level == first_level => {
+                    warm_field(&w.nnf, lv.target_size, input.source_style.size(), lv.source_size, patch_size)
+                }
+                _ if level > first_level => nnf_upscale(&nnf, patch_size, lv.target_size, lv.source_size),
+                _ => nnf_init_random(lv.target_size, lv.source_size, patch_size, &mut rng),
             };
             style = Image::new(lv.target_size.0, lv.target_size.1, ns);
             style2 = Image::new(lv.target_size.0, lv.target_size.1, ns);
@@ -466,6 +511,7 @@ fn synthesize_here(input: &SynthesisInput, params: &Params) -> Result<SynthesisO
 
         vote_plain(&mut style, &lv.source_style, &nnf, patch_size, rounding);
         lv.set_target_style(&style);
+        weighted_vote = false;
 
         let mut mask = sched.use_stop_threshold.then(|| vec![ACTIVE; tw * th]);
         let num_sv = sched.search_vote_iters[level];
@@ -485,6 +531,7 @@ fn synthesize_here(input: &SynthesisInput, params: &Params) -> Result<SynthesisO
                 VoteMode::Plain => vote_plain(&mut style2, &lv.source_style, &nnf, patch_size, rounding),
                 VoteMode::Weighted => vote_weighted(&mut style2, &lv.source_style, &nnf, &errors, patch_size, rounding),
             }
+            weighted_vote = sched.vote_mode == VoteMode::Weighted;
             std::mem::swap(&mut style, &mut style2);
             lv.set_target_style(&style);
 
@@ -505,6 +552,16 @@ fn synthesize_here(input: &SynthesisInput, params: &Params) -> Result<SynthesisO
                 lambda = 0.0;
                 continue;
             }
+            // The 16-bit result: the final field voted like the 8-bit one, from the 16-bit style.
+            let image16 = extras.style16.as_ref().map(|s16| {
+                let mut out = Image16::new(tw, th, ns);
+                if weighted_vote {
+                    vote_weighted16(&mut out, s16, &nnf, &errors, patch_size, VoteRounding::Nearest);
+                } else {
+                    vote_plain16(&mut out, s16, &nnf, patch_size, VoteRounding::Nearest);
+                }
+                out
+            });
             let errors = params.return_errors.then(|| {
                 // The target already holds the final image, so this is the error of the final
                 // field against the output, with the kernel the search used.
@@ -512,7 +569,7 @@ fn synthesize_here(input: &SynthesisInput, params: &Params) -> Result<SynthesisO
                 nnf_errors(&space, &nnf, &mut errors, space.kernel(params.bit_exact));
                 errors
             });
-            return Ok(SynthesisOutput { image: style, nnf, errors });
+            return Ok(SynthesisOutput { image: style, nnf, errors, image16 });
         }
         level += 1;
     }
@@ -521,6 +578,7 @@ fn synthesize_here(input: &SynthesisInput, params: &Params) -> Result<SynthesisO
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::extras::WarmStart;
 
     /// A smooth but non-repetitive colour image.
     fn test_image(w: usize, h: usize) -> Image {
@@ -778,5 +836,69 @@ mod tests {
         // Second guide uses R and A: source alpha is 255, target alpha varies.
         assert_eq!(input.source_guide.pixel(1, 0), &[9, 9, 255]);
         assert_eq!(input.target_guide.pixel(1, 0), &[9, 7, 101]);
+    }
+
+    #[test]
+    fn style16_reproduces_the_8_bit_result_at_full_precision() {
+        let input = shifted_input();
+        let wide = Image16::from_image(&input.source_style);
+        let extras = SynthesisExtras { style16: Some(wide), ..SynthesisExtras::default() };
+        for (vote, extra_pass_3x3) in
+            [(VoteMode::Plain, false), (VoteMode::Weighted, false), (VoteMode::Weighted, true)]
+        {
+            let params = Params {
+                vote_mode: Some(vote),
+                extra_pass_3x3,
+                omega_sync: OmegaSync::PerTile,
+                num_threads: Some(2),
+                ..Params::default()
+            };
+            let out = synthesize_with(&input, &params, &extras).unwrap();
+            let plain = synthesize(&input, &params).unwrap();
+            // The 16-bit style does not change the search.
+            assert_eq!((&plain.image, &plain.nnf), (&out.image, &out.nnf));
+            let image16 = out.image16.expect("16-bit result");
+            let differ = image16.to_image().data().iter().zip(out.image.data()).filter(|(a, b)| a != b).count();
+            assert!(differ <= 2, "{vote:?}, extra pass {extra_pass_3x3}: {differ} values differ");
+            assert!(image16.data().iter().any(|&v| v % 257 != 0), "no fractions kept");
+        }
+        let bad = SynthesisExtras { style16: Some(Image16::new(3, 3, 3)), ..SynthesisExtras::default() };
+        assert!(synthesize_with(&input, &Params::default(), &bad).is_err());
+    }
+
+    #[test]
+    fn warm_start_from_a_good_field_stays_good() {
+        let input = shifted_input();
+        let params =
+            Params { omega_sync: OmegaSync::PerTile, num_threads: Some(2), return_errors: true, ..Params::default() };
+        let cold = synthesize(&input, &params).unwrap();
+        let mean = |e: &[f32]| e.iter().map(|&v| f64::from(v)).sum::<f64>() / e.len() as f64;
+        let cold_err = mean(cold.errors.as_deref().unwrap());
+        for levels in [1, 2, 9] {
+            let extras = SynthesisExtras {
+                warm_start: Some(WarmStart { nnf: cold.nnf.clone(), levels }),
+                ..SynthesisExtras::default()
+            };
+            let warm = synthesize_with(&input, &params, &extras).unwrap();
+            let warm_err = mean(warm.errors.as_deref().unwrap());
+            assert!(warm_err <= cold_err * 1.05, "{levels} levels: {warm_err} vs cold {cold_err}");
+        }
+        // A random field run at the finest level only is worse than the full pyramid.
+        let mut rng = GlibcRand::new(3);
+        let random = nnf_init_random((72, 56), (72, 56), 5, &mut rng);
+        let extras =
+            SynthesisExtras { warm_start: Some(WarmStart { nnf: random, levels: 1 }), ..SynthesisExtras::default() };
+        let one = synthesize_with(
+            &input,
+            &Params { search_vote_iters: Some(PerLevel::Uniform(1)), ..params.clone() },
+            &extras,
+        )
+        .unwrap();
+        assert!(mean(one.errors.as_deref().unwrap()) > cold_err);
+        let bad = SynthesisExtras {
+            warm_start: Some(WarmStart { nnf: Nnf::new(3, 3), levels: 1 }),
+            ..SynthesisExtras::default()
+        };
+        assert!(synthesize(&input, &params).is_ok() && synthesize_with(&input, &params, &bad).is_err());
     }
 }

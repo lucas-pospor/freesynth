@@ -3,7 +3,7 @@
 
 use rayon::prelude::*;
 
-use crate::image::{Image, Nnf};
+use crate::image::{Image, Image16, Nnf};
 
 /// How a vote's average is converted back to an 8-bit value.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -27,46 +27,113 @@ impl VoteRounding {
     }
 }
 
+/// A sample type votes are written in: 8 bits for the search, 16 bits for a high-precision
+/// result.
+pub(crate) trait Sample: Copy + Send + Sync + 'static {
+    fn value(self) -> f32;
+    fn from_average(v: f32, rounding: VoteRounding) -> Self;
+}
+
+impl Sample for u8 {
+    #[inline(always)]
+    fn value(self) -> f32 {
+        self as f32
+    }
+
+    #[inline(always)]
+    fn from_average(v: f32, rounding: VoteRounding) -> Self {
+        rounding.apply(v)
+    }
+}
+
+impl Sample for u16 {
+    #[inline(always)]
+    fn value(self) -> f32 {
+        self as f32
+    }
+
+    #[inline(always)]
+    fn from_average(v: f32, rounding: VoteRounding) -> Self {
+        // `as` saturates, so averages a rounding step above the maximum stay at it.
+        match rounding {
+            VoteRounding::Nearest => (v + 0.5) as u16,
+            VoteRounding::Truncate => v as u16,
+        }
+    }
+}
+
+/// The pixels a vote reads from.
+#[derive(Clone, Copy)]
+struct Source<'a, T> {
+    data: &'a [T],
+    width: usize,
+    height: usize,
+    channels: usize,
+}
+
+impl<'a> Source<'a, u8> {
+    fn of(image: &'a Image) -> Self {
+        Self { data: image.data(), width: image.width(), height: image.height(), channels: image.channels() }
+    }
+}
+
+impl<'a> Source<'a, u16> {
+    fn of16(image: &'a Image16) -> Self {
+        Self { data: image.data(), width: image.width(), height: image.height(), channels: image.channels() }
+    }
+}
+
 /// Plain voting (`krnlVotePlain`, `EBSYNTH_VOTEMODE_PLAIN`): every overlapping patch has weight 1.
 ///
 /// Patches that fall outside the target, or whose source pixel would fall outside the source,
 /// are skipped (as in the CPU engine). Writes `target` (which must have the NNF's size and the
 /// source's channel count), converting averages with `rounding`.
 pub fn vote_plain(target: &mut Image, source: &Image, nnf: &Nnf, patch_size: usize, rounding: VoteRounding) {
-    let (w, h) = (nnf.width(), nnf.height());
-    assert_eq!(target.size(), (w, h), "vote target must match the NNF size");
+    assert_eq!(target.size(), (nnf.width(), nnf.height()), "vote target must match the NNF size");
     assert_eq!(target.channels(), source.channels());
-    if w == 0 || h == 0 || source.channels() == 0 {
+    plain(target.data_mut(), Source::of(source), nnf, patch_size, rounding);
+}
+
+/// [`vote_plain`] with 16-bit images: the same field voted from a high-precision source, for a
+/// high-precision result.
+pub fn vote_plain16(target: &mut Image16, source: &Image16, nnf: &Nnf, patch_size: usize, rounding: VoteRounding) {
+    assert_eq!(target.size(), (nnf.width(), nnf.height()), "vote target must match the NNF size");
+    assert_eq!(target.channels(), source.channels());
+    plain(target.data_mut(), Source::of16(source), nnf, patch_size, rounding);
+}
+
+fn plain<T: Sample>(target: &mut [T], source: Source<'_, T>, nnf: &Nnf, patch_size: usize, rounding: VoteRounding) {
+    if nnf.width() == 0 || nnf.height() == 0 || source.channels == 0 {
         return;
     }
-    match source.channels() {
-        1 => vote_plain_n::<1>(target, source, nnf, patch_size, rounding),
-        2 => vote_plain_n::<2>(target, source, nnf, patch_size, rounding),
-        3 => vote_plain_n::<3>(target, source, nnf, patch_size, rounding),
-        4 => vote_plain_n::<4>(target, source, nnf, patch_size, rounding),
-        5 => vote_plain_n::<5>(target, source, nnf, patch_size, rounding),
-        6 => vote_plain_n::<6>(target, source, nnf, patch_size, rounding),
-        7 => vote_plain_n::<7>(target, source, nnf, patch_size, rounding),
-        8 => vote_plain_n::<8>(target, source, nnf, patch_size, rounding),
-        _ => vote_plain_any(target, source, nnf, patch_size, rounding),
+    match source.channels {
+        1 => plain_n::<T, 1>(target, source, nnf, patch_size, rounding),
+        2 => plain_n::<T, 2>(target, source, nnf, patch_size, rounding),
+        3 => plain_n::<T, 3>(target, source, nnf, patch_size, rounding),
+        4 => plain_n::<T, 4>(target, source, nnf, patch_size, rounding),
+        5 => plain_n::<T, 5>(target, source, nnf, patch_size, rounding),
+        6 => plain_n::<T, 6>(target, source, nnf, patch_size, rounding),
+        7 => plain_n::<T, 7>(target, source, nnf, patch_size, rounding),
+        8 => plain_n::<T, 8>(target, source, nnf, patch_size, rounding),
+        _ => plain_any(target, source, nnf, patch_size, rounding),
     }
 }
 
 /// [`vote_plain`] for `N` channels: the accumulator lives in registers and the patch window is
 /// clipped to the target once per pixel. Accumulation order is the same as the original's.
-fn vote_plain_n<const N: usize>(
-    target: &mut Image,
-    source: &Image,
+fn plain_n<T: Sample, const N: usize>(
+    target: &mut [T],
+    source: Source<'_, T>,
     nnf: &Nnf,
     patch_size: usize,
     rounding: VoteRounding,
 ) {
     let (w, h) = (nnf.width(), nnf.height());
     let r = patch_size / 2;
-    let (sw, sh) = (source.width() as i32, source.height() as i32);
-    let src = source.data().as_chunks::<N>().0;
+    let (sw, sh) = (source.width as i32, source.height as i32);
+    let src = source.data.as_chunks::<N>().0;
     let field = nnf.data();
-    target.data_mut().par_chunks_mut(w * N).enumerate().for_each(|(y, row)| {
+    target.par_chunks_mut(w * N).enumerate().for_each(|(y, row)| {
         let (ylo, yhi) = (y.saturating_sub(r), (y + r).min(h - 1));
         for (x, out) in row.as_chunks_mut::<N>().0.iter_mut().enumerate() {
             let (xlo, xhi) = (x.saturating_sub(r), (x + r).min(w - 1));
@@ -81,7 +148,7 @@ fn vote_plain_n<const N: usize>(
                     if sx >= 0 && sx < sw && sy >= 0 && sy < sh {
                         let s = &src[sy as usize * sw as usize + sx as usize];
                         for (a, &v) in sum.iter_mut().zip(s) {
-                            *a += v as f32;
+                            *a += v.value();
                         }
                         count += 1.0;
                     }
@@ -89,21 +156,21 @@ fn vote_plain_n<const N: usize>(
             }
             // The centre patch always lands inside the source, so count > 0.
             for (o, &a) in out.iter_mut().zip(&sum) {
-                *o = rounding.apply(a / count);
+                *o = T::from_average(a / count, rounding);
             }
         }
     });
 }
 
 /// [`vote_plain`] for any channel count.
-fn vote_plain_any(target: &mut Image, source: &Image, nnf: &Nnf, patch_size: usize, rounding: VoteRounding) {
+fn plain_any<T: Sample>(target: &mut [T], source: Source<'_, T>, nnf: &Nnf, patch_size: usize, rounding: VoteRounding) {
     let (w, h) = (nnf.width() as i32, nnf.height() as i32);
-    let nc = source.channels();
+    let nc = source.channels;
     let r = (patch_size / 2) as i32;
-    let (sw, sh) = (source.width() as i32, source.height() as i32);
-    let src = source.data();
+    let (sw, sh) = (source.width as i32, source.height as i32);
+    let src = source.data;
     let field = nnf.data();
-    target.data_mut().par_chunks_mut(w as usize * nc).enumerate().for_each(|(y, row)| {
+    target.par_chunks_mut(w as usize * nc).enumerate().for_each(|(y, row)| {
         let y = y as i32;
         let mut sum = vec![0.0f32; nc];
         for (x, out) in row.chunks_exact_mut(nc).enumerate() {
@@ -121,14 +188,14 @@ fn vote_plain_any(target: &mut Image, source: &Image, nnf: &Nnf, patch_size: usi
                     if sx >= 0 && sx < sw && sy >= 0 && sy < sh {
                         let p = (sy * sw + sx) as usize * nc;
                         for (a, &v) in sum.iter_mut().zip(&src[p..p + nc]) {
-                            *a += v as f32;
+                            *a += v.value();
                         }
                         count += 1.0;
                     }
                 }
             }
             for (o, &a) in out.iter_mut().zip(sum.iter()) {
-                *o = rounding.apply(a / count);
+                *o = T::from_average(a / count, rounding);
             }
         }
     });
@@ -154,40 +221,71 @@ pub fn vote_weighted(
     patch_size: usize,
     rounding: VoteRounding,
 ) {
-    let (w, h) = (nnf.width(), nnf.height());
-    assert_eq!(target.size(), (w, h), "vote target must match the NNF size");
+    assert_eq!(target.size(), (nnf.width(), nnf.height()), "vote target must match the NNF size");
     assert_eq!(target.channels(), source.channels());
+    weighted(target.data_mut(), Source::of(source), nnf, errors, patch_size, rounding);
+}
+
+/// [`vote_weighted`] with 16-bit images. The weights depend only on `errors` (the 8-bit
+/// search's), so with the errors of the search's final vote this reproduces that vote at full
+/// precision.
+pub fn vote_weighted16(
+    target: &mut Image16,
+    source: &Image16,
+    nnf: &Nnf,
+    errors: &[f32],
+    patch_size: usize,
+    rounding: VoteRounding,
+) {
+    assert_eq!(target.size(), (nnf.width(), nnf.height()), "vote target must match the NNF size");
+    assert_eq!(target.channels(), source.channels());
+    weighted(target.data_mut(), Source::of16(source), nnf, errors, patch_size, rounding);
+}
+
+fn weighted<T: Sample>(
+    target: &mut [T],
+    source: Source<'_, T>,
+    nnf: &Nnf,
+    errors: &[f32],
+    patch_size: usize,
+    rounding: VoteRounding,
+) {
+    let (w, h) = (nnf.width(), nnf.height());
     assert_eq!(errors.len(), w * h);
-    let nc = source.channels();
+    let nc = source.channels;
     if w == 0 || h == 0 || nc == 0 {
         return;
     }
-    assert!(source.width() > 0 && source.height() > 0, "cannot vote from an empty source");
-    let norm = (patch_size * patch_size * nc) as f32;
-    // One weight per target pixel (its patch's), computed once instead of once per overlap.
-    let weights: Vec<f32> = errors.par_iter().map(|&e| 1.0 / (1.0 + e / norm)).collect();
+    assert!(source.width > 0 && source.height > 0, "cannot vote from an empty source");
+    let weights = vote_weights(errors, patch_size, nc);
     match nc {
-        1 => vote_weighted_n::<1>(target, source, nnf, &weights, patch_size, rounding),
-        2 => vote_weighted_n::<2>(target, source, nnf, &weights, patch_size, rounding),
-        3 => vote_weighted_n::<3>(target, source, nnf, &weights, patch_size, rounding),
-        4 => vote_weighted_n::<4>(target, source, nnf, &weights, patch_size, rounding),
-        5 => vote_weighted_n::<5>(target, source, nnf, &weights, patch_size, rounding),
-        6 => vote_weighted_n::<6>(target, source, nnf, &weights, patch_size, rounding),
-        7 => vote_weighted_n::<7>(target, source, nnf, &weights, patch_size, rounding),
-        8 => vote_weighted_n::<8>(target, source, nnf, &weights, patch_size, rounding),
-        _ => vote_weighted_any(target, source, nnf, &weights, patch_size, rounding),
+        1 => weighted_n::<T, 1>(target, source, nnf, &weights, patch_size, rounding),
+        2 => weighted_n::<T, 2>(target, source, nnf, &weights, patch_size, rounding),
+        3 => weighted_n::<T, 3>(target, source, nnf, &weights, patch_size, rounding),
+        4 => weighted_n::<T, 4>(target, source, nnf, &weights, patch_size, rounding),
+        5 => weighted_n::<T, 5>(target, source, nnf, &weights, patch_size, rounding),
+        6 => weighted_n::<T, 6>(target, source, nnf, &weights, patch_size, rounding),
+        7 => weighted_n::<T, 7>(target, source, nnf, &weights, patch_size, rounding),
+        8 => weighted_n::<T, 8>(target, source, nnf, &weights, patch_size, rounding),
+        _ => weighted_any(target, source, nnf, &weights, patch_size, rounding),
     }
 }
 
+/// One weight per target pixel (its patch's), computed once instead of once per overlap.
+fn vote_weights(errors: &[f32], patch_size: usize, channels: usize) -> Vec<f32> {
+    let norm = (patch_size * patch_size * channels) as f32;
+    errors.par_iter().map(|&e| 1.0 / (1.0 + e / norm)).collect()
+}
+
 /// [`vote_weighted`] for `N` channels with precomputed per-pixel `weights` (accumulators in
-/// registers). Accumulation order is the same as [`vote_weighted_any`]'s, so results are too.
+/// registers). Accumulation order is the same as [`weighted_any`]'s, so results are too.
 ///
 /// Away from the target border, and when every field entry is a valid patch centre (as the
 /// engine's always are), no coordinate can need clamping, so those pixels take a loop without
 /// clamps.
-fn vote_weighted_n<const N: usize>(
-    target: &mut Image,
-    source: &Image,
+fn weighted_n<T: Sample, const N: usize>(
+    target: &mut [T],
+    source: Source<'_, T>,
     nnf: &Nnf,
     weights: &[f32],
     patch_size: usize,
@@ -195,11 +293,11 @@ fn vote_weighted_n<const N: usize>(
 ) {
     let (w, h) = (nnf.width() as i32, nnf.height() as i32);
     let r = (patch_size / 2) as i32;
-    let (sw, sh) = (source.width() as i32, source.height() as i32);
-    let src = source.data().as_chunks::<N>().0;
+    let (sw, sh) = (source.width as i32, source.height as i32);
+    let src = source.data.as_chunks::<N>().0;
     let field = nnf.data();
     let centres_valid = field.par_iter().all(|&[x, y]| x >= r && x < sw - r && y >= r && y < sh - r);
-    target.data_mut().par_chunks_mut(w as usize * N).enumerate().for_each(|(y, row)| {
+    target.par_chunks_mut(w as usize * N).enumerate().for_each(|(y, row)| {
         let y = y as i32;
         for (x, out) in row.as_chunks_mut::<N>().0.iter_mut().enumerate() {
             let x = x as i32;
@@ -215,7 +313,7 @@ fn vote_weighted_n<const N: usize>(
                             let [nx, ny] = field[idx];
                             let wgt = weights[idx];
                             for (a, &v) in sum.iter_mut().zip(&src[((ny - py) * sw + nx - px) as usize]) {
-                                *a += wgt * v as f32;
+                                *a += wgt * v.value();
                             }
                             sum_w += wgt;
                         }
@@ -232,7 +330,7 @@ fn vote_weighted_n<const N: usize>(
                         let sy = (ny - py).clamp(0, sh - 1);
                         let wgt = if weighted { weights[idx] } else { 1.0 };
                         for (a, &v) in sum.iter_mut().zip(&src[(sy * sw + sx) as usize]) {
-                            *a += wgt * v as f32;
+                            *a += wgt * v.value();
                         }
                         sum_w += wgt;
                     }
@@ -244,29 +342,29 @@ fn vote_weighted_n<const N: usize>(
                 (sum, sum_w) = accumulate(false);
             }
             for (o, &a) in out.iter_mut().zip(&sum) {
-                *o = rounding.apply(a / sum_w);
+                *o = T::from_average(a / sum_w, rounding);
             }
         }
     });
 }
 
 /// [`vote_weighted`] for any channel count, with precomputed per-pixel `weights`.
-fn vote_weighted_any(
-    target: &mut Image,
-    source: &Image,
+fn weighted_any<T: Sample>(
+    target: &mut [T],
+    source: Source<'_, T>,
     nnf: &Nnf,
     weights: &[f32],
     patch_size: usize,
     rounding: VoteRounding,
 ) {
     let (w, h) = (nnf.width(), nnf.height());
-    let nc = source.channels();
+    let nc = source.channels;
     let r = (patch_size / 2) as i32;
-    let (sw, sh) = (source.width() as i32, source.height() as i32);
-    let src = source.data();
+    let (sw, sh) = (source.width as i32, source.height as i32);
+    let src = source.data;
     let field = nnf.data();
     let (wi, hi) = (w as i32, h as i32);
-    target.data_mut().par_chunks_mut(w * nc).enumerate().for_each(|(y, row)| {
+    target.par_chunks_mut(w * nc).enumerate().for_each(|(y, row)| {
         let y = y as i32;
         let mut sum = vec![0.0f32; nc];
         for (x, out) in row.chunks_exact_mut(nc).enumerate() {
@@ -285,7 +383,7 @@ fn vote_weighted_any(
                         let wgt = if weighted { weights[idx] } else { 1.0 };
                         let p = (sy * sw + sx) as usize * nc;
                         for (a, &v) in sum.iter_mut().zip(&src[p..p + nc]) {
-                            *a += wgt * v as f32;
+                            *a += wgt * v.value();
                         }
                         sum_w += wgt;
                     }
@@ -297,7 +395,7 @@ fn vote_weighted_any(
                 sum_w = accumulate(false);
             }
             for (o, &a) in out.iter_mut().zip(sum.iter()) {
-                *o = rounding.apply(a / sum_w);
+                *o = T::from_average(a / sum_w, rounding);
             }
         }
     });
@@ -394,7 +492,7 @@ mod tests {
                 let mut a = Image::new(13, 9, nc);
                 vote_plain(&mut a, &src, &nnf, patch, VoteRounding::Truncate);
                 let mut b = Image::new(13, 9, nc);
-                vote_plain_any(&mut b, &src, &nnf, patch, VoteRounding::Truncate);
+                plain_any(b.data_mut(), Source::of(&src), &nnf, patch, VoteRounding::Truncate);
                 assert_eq!(a, b, "{nc} channels, patch {patch}");
             }
         }
@@ -418,7 +516,7 @@ mod tests {
                 let mut a = Image::new(13, 9, nc);
                 vote_weighted(&mut a, &src, &nnf, &errors, 3, rounding);
                 let mut b = Image::new(13, 9, nc);
-                vote_weighted_any(&mut b, &src, &nnf, &weights, 3, rounding);
+                weighted_any(b.data_mut(), Source::of(&src), &nnf, &weights, 3, rounding);
                 assert_eq!(a, b, "{nc} channels");
             }
             // A field with an entry outside the valid centres takes the clamped path everywhere.
@@ -427,7 +525,7 @@ mod tests {
             let mut a = Image::new(13, 9, nc);
             vote_weighted(&mut a, &src, &bad, &errors, 3, VoteRounding::Nearest);
             let mut b = Image::new(13, 9, nc);
-            vote_weighted_any(&mut b, &src, &bad, &weights, 3, VoteRounding::Nearest);
+            weighted_any(b.data_mut(), Source::of(&src), &bad, &weights, 3, VoteRounding::Nearest);
             assert_eq!(a, b, "{nc} channels, invalid centre");
         }
     }
@@ -471,7 +569,7 @@ mod tests {
         assert_eq!(t.pixel(0, 0), &[12]);
         // The generic path rounds the same way.
         let mut g = Image::new(2, 1, 1);
-        vote_plain_any(&mut g, &src, &nnf, 3, VoteRounding::Nearest);
+        plain_any(g.data_mut(), Source::of(&src), &nnf, 3, VoteRounding::Nearest);
         assert_eq!(g, t);
         // Weighted: equal errors give equal weights; values stay in range.
         let bright = Image::from_raw(3, 3, 1, vec![255; 9]);
@@ -516,5 +614,41 @@ mod tests {
         vote_weighted(&mut weighted, &src, &nnf, &[0.0, 1.0e6], 3, VoteRounding::Truncate);
         assert!(weighted.pixel(1, 0)[0] < plain.pixel(1, 0)[0]);
         assert!(weighted.pixel(0, 0)[0] <= plain.pixel(0, 0)[0]);
+    }
+
+    #[test]
+    fn sixteen_bit_votes_match_the_8_bit_votes_at_full_precision() {
+        // A widened 8-bit source voted at 16 bits and rounded back gives the 8-bit vote.
+        let src = ramp(19, 13, 3);
+        let wide = Image16::from_image(&src);
+        let mut nnf = Nnf::new(15, 11);
+        let mut errors = Vec::new();
+        for y in 0..11 {
+            for x in 0..15 {
+                nnf.set(x, y, [((x * 7 + y * 3) % 15 + 2) as i32, ((x + y * 5) % 9 + 2) as i32]);
+                errors.push(((x * 31 + y * 17) % 23) as f32 * 40.0);
+            }
+        }
+        for patch in [3, 5] {
+            let mut a = Image::new(15, 11, 3);
+            vote_plain(&mut a, &src, &nnf, patch, VoteRounding::Nearest);
+            let mut b = Image16::new(15, 11, 3);
+            vote_plain16(&mut b, &wide, &nnf, patch, VoteRounding::Nearest);
+            assert_eq!(b.to_image(), a, "plain, patch {patch}");
+            // The 16-bit result keeps the fractions the 8-bit one rounds away.
+            assert!(b.data().iter().any(|&v| v % 257 != 0));
+            let mut a = Image::new(15, 11, 3);
+            vote_weighted(&mut a, &src, &nnf, &errors, patch, VoteRounding::Nearest);
+            let mut b = Image16::new(15, 11, 3);
+            vote_weighted16(&mut b, &wide, &nnf, &errors, patch, VoteRounding::Nearest);
+            let diff = b.to_image().data().iter().zip(a.data()).filter(|(x, y)| x != y).count();
+            // Float rounding may flip an average sitting on a half level.
+            assert!(diff <= 1, "weighted, patch {patch}: {diff} values differ");
+        }
+        // Saturation at the top of the range.
+        let white = Image16::from_raw(3, 3, 1, vec![65535; 9]);
+        let mut out = Image16::new(2, 1, 1);
+        vote_weighted16(&mut out, &white, &Nnf::from_raw(2, 1, vec![[1, 1]; 2]), &[0.0; 2], 3, VoteRounding::Nearest);
+        assert_eq!(out.data(), &[65535, 65535]);
     }
 }

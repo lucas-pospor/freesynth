@@ -11,7 +11,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use freesynth_core::{Image, io};
+use freesynth_core::{Image, Image16, io};
 use freesynth_flow::GrayImage;
 
 use crate::error::{VideoError, invalid, io_error};
@@ -313,10 +313,19 @@ impl<'a> FrameCache<'a> {
 pub trait FrameSink: Send + Sync {
     /// Stores frame `frame`.
     fn write(&self, frame: usize, image: &Image) -> Result<(), VideoError>;
+
+    /// Stores a 16-bit frame: renders with 16-bit keyframes
+    /// ([`Renderer::keyframes16`](crate::Renderer::keyframes16)) call this instead of
+    /// [`write`](Self::write). The default rounds the frame to 8 bits and calls `write`; sinks
+    /// that can keep the extra precision override it.
+    fn write16(&self, frame: usize, image: &Image16) -> Result<(), VideoError> {
+        self.write(frame, &image.to_image())
+    }
 }
 
 /// Writes frames as numbered image files. The format follows the extension (PNG, JPEG, BMP or
-/// TGA).
+/// TGA). 16-bit frames are written as 16-bit PNG files when the extension is `.png`, and rounded
+/// to 8 bits for the other formats.
 #[derive(Clone, Debug)]
 pub struct ImageSequenceWriter {
     pattern: PathBuf,
@@ -350,12 +359,23 @@ impl FrameSink for ImageSequenceWriter {
         let path = self.path(frame);
         io::save(image, &path).map_err(|source| VideoError::Save { path, source })
     }
+
+    fn write16(&self, frame: usize, image: &Image16) -> Result<(), VideoError> {
+        let path = self.path(frame);
+        if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("png")) {
+            io::save_png16(image, &path).map_err(|source| VideoError::Save { path, source })
+        } else {
+            self.write(frame, &image.to_image())
+        }
+    }
 }
 
-/// Collects frames in memory (for tests and hosts that encode frames themselves).
+/// Collects frames in memory (for tests and hosts that encode frames themselves). 16-bit frames
+/// are kept as they are ([`into_frames16`](Self::into_frames16)) and, rounded, as 8-bit frames.
 #[derive(Debug, Default)]
 pub struct MemorySink {
     frames: Mutex<BTreeMap<usize, Image>>,
+    frames16: Mutex<BTreeMap<usize, Image16>>,
 }
 
 impl MemorySink {
@@ -367,6 +387,11 @@ impl MemorySink {
     pub fn into_frames(self) -> BTreeMap<usize, Image> {
         self.frames.into_inner().unwrap_or_else(|e| e.into_inner())
     }
+
+    /// The 16-bit frames received so far, by frame number.
+    pub fn into_frames16(self) -> BTreeMap<usize, Image16> {
+        self.frames16.into_inner().unwrap_or_else(|e| e.into_inner())
+    }
 }
 
 impl FrameSink for MemorySink {
@@ -375,6 +400,12 @@ impl FrameSink for MemorySink {
         if previous.is_some() {
             return invalid(format!("frame {frame} was written twice"));
         }
+        Ok(())
+    }
+
+    fn write16(&self, frame: usize, image: &Image16) -> Result<(), VideoError> {
+        self.write(frame, &image.to_image())?;
+        self.frames16.lock().unwrap_or_else(|e| e.into_inner()).insert(frame, image.clone());
         Ok(())
     }
 }

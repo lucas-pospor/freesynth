@@ -36,7 +36,7 @@ impl Synthesizer for Capture {
         assert_eq!(video.weight, WEIGHTS.video);
         let image = Image::from_raw(w, h, video.channels.len(), channels(&input.target_guide, &video.channels));
         self.inputs.lock().unwrap().push(input.clone());
-        Ok(SynthesisOutput { image, nnf: Nnf::new(w, h), errors: None })
+        Ok(SynthesisOutput { image, nnf: Nnf::new(w, h), errors: None, image16: None })
     }
 }
 
@@ -136,6 +136,17 @@ fn capture(
     mask: Option<&MemoryFrames>,
     gate: bool,
 ) -> Vec<SynthesisInput> {
+    capture_with(scene, key, style, mask, params(gate))
+}
+
+/// [`capture`] with explicit parameters.
+fn capture_with(
+    scene: &TestScene,
+    key: usize,
+    style: Image,
+    mask: Option<&MemoryFrames>,
+    params: VideoParams,
+) -> Vec<SynthesisInput> {
     let shot = Shot {
         frames: &scene.video,
         keyframes: vec![Keyframe { frame: key, style }],
@@ -144,7 +155,7 @@ fn capture(
     };
     let engine = Capture::default();
     let device = ComputeDevice::cpu();
-    Renderer::with_engines(&engine, &device, params(gate))
+    Renderer::with_engines(&engine, &device, params)
         .options(RenderOptions { parallel_chains: Some(1), ..RenderOptions::default() })
         .render(&shot, &MemorySink::new())
         .unwrap();
@@ -334,4 +345,56 @@ fn gating_switches_the_mapping_guide_off_where_tracking_is_lost() {
         checked += core;
     }
     assert!(checked > 30, "the scene has disocclusions to check ({checked} pixels)");
+}
+
+#[test]
+fn temporal_gating_switches_the_temporal_guide_off_where_the_warp_is_wrong() {
+    let scene = TestScene::new(160, 96, 6, 5.0);
+    let (w, h) = scene.size();
+    let gated = VideoParams { gate_temporal: true, temporal_gate_erosion: 1, ..params(false) };
+    let inputs = capture_with(&scene, 0, scene.truth[0].clone(), None, gated);
+    let mut checked = 0;
+    for (t, input) in inputs.iter().enumerate().skip(1) {
+        let temporal = layer(input, WEIGHTS.temporal).expect("temporal layer");
+        let modulation = input.target_modulation.as_ref().expect("gating modulates the temporal guide");
+        let weights = channels(modulation, &temporal);
+        for other in [WEIGHTS.video, WEIGHTS.mapping] {
+            let range = layer(input, other).unwrap();
+            assert!(
+                channels(modulation, &range).iter().all(|&v| v == 255),
+                "frame {t}: only the temporal guide is gated"
+            );
+        }
+        // Disoccluded since the previous frame: the content seen at t was behind another layer
+        // (or outside the frame) at t - 1, so the warped previous output is wrong there.
+        let (now, before) = (scene.scene.render(t).layers, scene.scene.render(t - 1).layers);
+        let (flow, _) = scene.flow(t, t - 1);
+        let disoccluded = |x: usize, y: usize| {
+            let d = flow.data()[y * w + x];
+            let (px, py) = ((x as f32 + d[0]).round(), (y as f32 + d[1]).round());
+            if px < 0.0 || py < 0.0 || px >= w as f32 || py >= h as f32 {
+                return true;
+            }
+            before.layer(px as usize, py as usize) != now.layer(x, y)
+        };
+        let r = 1;
+        let (mut off, mut core) = (0usize, 0usize);
+        for y in r..h - r {
+            for x in r..w - r {
+                if (y - r..=y + r).all(|yy| (x - r..=x + r).all(|xx| disoccluded(xx, yy))) {
+                    core += 1;
+                    off += usize::from(weights[(y * w + x) * temporal.len()] == 0);
+                }
+            }
+        }
+        let on = weights.iter().filter(|&&v| v == 255).count() as f64 / weights.len() as f64;
+        println!("frame {t}: {core} core disoccluded pixels, {off} switched off; {:.1}% fully on", 100.0 * on);
+        assert!(off as f64 >= 0.65 * core as f64, "frame {t}: {off} of {core} disoccluded pixels switched off");
+        assert!(on > 0.8, "frame {t}: most of the frame keeps the temporal guide");
+        checked += core;
+    }
+    assert!(checked > 20, "the scene has disocclusions to check ({checked} pixels)");
+    // Without gating there is no modulation at all.
+    let plain = capture_with(&scene, 0, scene.truth[0].clone(), None, params(false));
+    assert!(plain.iter().all(|i| i.target_modulation.is_none()));
 }

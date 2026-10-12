@@ -33,8 +33,16 @@
 //! Besides the image, [`SynthesisOutput`] holds the final nearest-neighbour field and, with
 //! [`Params::return_errors`], the final per-pixel patch errors (for example to find regions the
 //! source cannot explain). [`SynthesisInput::target_modulation`] weights the guides per pixel.
+//!
+//! # Extras
+//!
+//! [`synthesize_with`] takes optional [`SynthesisExtras`]: a [`WarmStart`] from a known field
+//! (for video, the previous frame's), which runs only the finest pyramid levels; and a 16-bit
+//! style ([`Image16`]), from which the final field is voted again for a 16-bit result
+//! ([`SynthesisOutput::image16`]).
 
 mod error;
+mod extras;
 mod image;
 pub mod io;
 mod mask;
@@ -49,16 +57,17 @@ mod synth;
 mod vote;
 
 pub use crate::error::Error;
-pub use crate::image::{Image, Nnf};
+pub use crate::extras::{SynthesisExtras, WarmStart};
+pub use crate::image::{Image, Image16, Nnf};
 pub use crate::nnf::{nnf_init_random, nnf_upscale};
 pub use crate::patch_error::{ErrorPart, NnfErrors, PatchDistance, PatchErrorEvaluator, nnf_patch_errors};
 pub use crate::pyramid::{max_pyramid_levels, pyramid_level_size, resample};
 pub use crate::rng::GlibcRand;
 pub use crate::schedule::{Engine, Preset, Schedule, SearchMode};
 pub use crate::synth::{
-    GuideLayer, OmegaSync, Params, PerLevel, SynthesisInput, SynthesisOutput, VoteMode, synthesize,
+    GuideLayer, OmegaSync, Params, PerLevel, SynthesisInput, SynthesisOutput, VoteMode, synthesize, synthesize_with,
 };
-pub use crate::vote::{VoteRounding, vote_plain, vote_weighted};
+pub use crate::vote::{VoteRounding, vote_plain, vote_plain16, vote_weighted, vote_weighted16};
 
 /// Maximum number of style channels, as in the original (`EBSYNTH_MAX_STYLE_CHANNELS`).
 pub const MAX_STYLE_CHANNELS: usize = 8;

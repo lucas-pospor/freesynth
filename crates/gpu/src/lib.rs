@@ -60,7 +60,7 @@ mod error;
 
 use std::sync::Mutex;
 
-use freesynth_core::{Params, SynthesisInput, SynthesisOutput};
+use freesynth_core::{Params, SynthesisExtras, SynthesisInput, SynthesisOutput};
 
 pub use crate::error::GpuError;
 
@@ -244,7 +244,20 @@ impl GpuContext {
 
     /// Runs example-based synthesis on the GPU (`ebsynthRun` with the CUDA backend).
     pub fn synthesize(&self, input: &SynthesisInput, params: &Params) -> Result<SynthesisOutput, GpuError> {
-        engine::synthesize(self, input, params).map(|(out, _)| out)
+        self.synthesize_with(input, params, &SynthesisExtras::default())
+    }
+
+    /// [`synthesize`](Self::synthesize) with optional extra inputs, as
+    /// [`freesynth_core::synthesize_with`]: a warm start (only the finest levels run on the GPU)
+    /// and a 16-bit style (the final field is voted from it on the CPU after the readback, with
+    /// the final vote's errors).
+    pub fn synthesize_with(
+        &self,
+        input: &SynthesisInput,
+        params: &Params,
+        extras: &SynthesisExtras,
+    ) -> Result<SynthesisOutput, GpuError> {
+        engine::synthesize(self, input, params, extras).map(|(out, _)| out)
     }
 }
 
@@ -256,8 +269,8 @@ pub fn synthesize(input: &SynthesisInput, params: &Params) -> Result<SynthesisOu
 #[cfg(test)]
 mod tests {
     use freesynth_core::{
-        GlibcRand, Image, Params, PerLevel, Preset, SearchMode, SynthesisInput, VoteMode, VoteRounding,
-        nnf_init_random, nnf_patch_errors, vote_plain,
+        GlibcRand, Image, Image16, Params, PerLevel, Preset, SearchMode, SynthesisInput, VoteMode, VoteRounding,
+        WarmStart, nnf_init_random, nnf_patch_errors, vote_plain,
     };
 
     use super::*;
@@ -581,7 +594,7 @@ mod tests {
         let mut counts = Vec::new();
         for budget in [1, u64::MAX] {
             ctx.submission_budget = budget;
-            let (out, submissions) = engine::synthesize(&ctx, &input, &params).unwrap();
+            let (out, submissions) = engine::synthesize(&ctx, &input, &params, &SynthesisExtras::default()).unwrap();
             let p = psnr(&out.image, &freesynth_core::synthesize(&input, &params).unwrap().image);
             assert!(p > 25.0, "budget {budget}: GPU vs CPU PSNR {p:.2} dB");
             counts.push(submissions);
@@ -597,7 +610,8 @@ mod tests {
             let mut outputs = Vec::new();
             for budget in [u64::MAX, 1, 2_000_000] {
                 ctx.submission_budget = budget;
-                let (out, submissions) = engine::synthesize(&ctx, &input, &params).unwrap();
+                let (out, submissions) =
+                    engine::synthesize(&ctx, &input, &params, &SynthesisExtras::default()).unwrap();
                 outputs.push((budget, submissions, out));
             }
             let (_, _, reference) = &outputs[0];
@@ -694,5 +708,36 @@ mod tests {
         let mut bad = input.clone();
         bad.guide_weights[0] = -1.0;
         assert!(ctx.synthesize(&bad, &Params::default()).is_err());
+    }
+
+    #[test]
+    fn extras_work_on_the_gpu() {
+        let Some(ctx) = context() else { return };
+        let input = shifted_input();
+        let mean = |e: &[f32]| e.iter().map(|&v| f64::from(v)).sum::<f64>() / e.len() as f64;
+        let params = Params { return_errors: true, ..Params::default() };
+        let cold = ctx.synthesize(&input, &params).unwrap();
+        let cold_err = mean(cold.errors.as_deref().unwrap());
+
+        // A warm start from a good field stays as good.
+        let warm = SynthesisExtras {
+            warm_start: Some(WarmStart { nnf: cold.nnf.clone(), levels: 2 }),
+            ..SynthesisExtras::default()
+        };
+        let out = ctx.synthesize_with(&input, &params, &warm).unwrap();
+        let warm_err = mean(out.errors.as_deref().unwrap());
+        assert!(warm_err <= cold_err * 1.05, "warm {warm_err} vs cold {cold_err}");
+
+        // The 16-bit style reproduces the 8-bit result with more precision.
+        let wide =
+            SynthesisExtras { style16: Some(Image16::from_image(&input.source_style)), ..SynthesisExtras::default() };
+        for extra_pass_3x3 in [false, true] {
+            let p = Params { extra_pass_3x3, ..params.clone() };
+            let out = ctx.synthesize_with(&input, &p, &wide).unwrap();
+            let image16 = out.image16.unwrap();
+            let differ = image16.to_image().data().iter().zip(out.image.data()).filter(|(a, b)| a != b).count();
+            assert!(differ * 1000 <= out.image.data().len(), "extra pass {extra_pass_3x3}: {differ} values differ");
+            assert!(image16.data().iter().any(|&v| v % 257 != 0));
+        }
     }
 }

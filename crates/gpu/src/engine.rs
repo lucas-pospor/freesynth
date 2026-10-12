@@ -13,8 +13,8 @@ use std::sync::{Arc, mpsc};
 use std::time::Instant;
 
 use freesynth_core::{
-    Engine, GlibcRand, Image, Nnf, Params, Schedule, SearchMode, SynthesisInput, SynthesisOutput, VoteMode,
-    VoteRounding, nnf_init_random, pyramid_level_size,
+    Engine, GlibcRand, Image, Image16, Nnf, Params, Schedule, SearchMode, SynthesisExtras, SynthesisInput,
+    SynthesisOutput, VoteMode, VoteRounding, nnf_init_random, pyramid_level_size, vote_plain16, vote_weighted16,
 };
 use wgpu::util::DeviceExt;
 
@@ -473,9 +473,10 @@ impl<'a> Submitter<'a> {
         }
         self.pending = self.pending.saturating_add(cost);
         if self.pass.is_none() {
-            let encoder = self.encoder.insert(
-                self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("synthesis") }),
-            );
+            let device = self.device;
+            let encoder = self.encoder.get_or_insert_with(|| {
+                device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("synthesis") })
+            });
             let pass = encoder
                 .begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("synthesis"), timestamp_writes: None })
                 .forget_lifetime();
@@ -517,6 +518,17 @@ impl<'a> Submitter<'a> {
         pass.dispatch_workgroups(groups.0, groups.1, 1);
     }
 
+    /// Records a buffer copy after the dispatches recorded so far.
+    fn copy(&mut self, from: &wgpu::Buffer, to: &wgpu::Buffer, bytes: u64) {
+        self.pass = None;
+        let device = self.device;
+        self.encoder
+            .get_or_insert_with(|| {
+                device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("copy") })
+            })
+            .copy_buffer_to_buffer(from, 0, to, 0, bytes);
+    }
+
     /// Submits everything recorded so far.
     fn flush(&mut self) {
         // The pass must end before its encoder can finish.
@@ -539,11 +551,13 @@ pub(crate) fn synthesize(
     ctx: &GpuContext,
     input: &SynthesisInput,
     params: &Params,
+    extras: &SynthesisExtras,
 ) -> Result<(SynthesisOutput, usize), GpuError> {
     let sched = params.schedule(input, Engine::Gpu).map_err(|e| GpuError::InvalidInput(e.to_string()))?;
+    extras.validate(input).map_err(|e| GpuError::InvalidInput(e.to_string()))?;
     let oom = ctx.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
     let validation = ctx.device.push_error_scope(wgpu::ErrorFilter::Validation);
-    let result = run(ctx, input, params, &sched);
+    let result = run(ctx, input, params, &sched, extras);
     let validation = pollster::block_on(validation.pop());
     let oom = pollster::block_on(oom.pop());
     if let Some(e) = validation.or(oom) {
@@ -557,6 +571,7 @@ fn run(
     input: &SynthesisInput,
     params: &Params,
     sched: &Schedule,
+    extras: &SynthesisExtras,
 ) -> Result<(SynthesisOutput, usize), GpuError> {
     let t_start = Instant::now();
     let (device, queue) = (&ctx.device, &ctx.queue);
@@ -571,6 +586,8 @@ fn run(
     let num_levels = sched.num_levels;
     let phases = phases(params, num_levels, source_size, target_size);
     let use_mask = sched.use_stop_threshold;
+    // With a warm start, the coarse levels are skipped.
+    let first_level = extras.warm_start.as_ref().map_or(0, |w| num_levels.saturating_sub(w.levels));
 
     // --- Limits -------------------------------------------------------------------------------
     let src_px = (source_size.0 * source_size.1) as u64;
@@ -628,10 +645,22 @@ fn run(
     let mask_tmp = storage("mask scratch", tgt_px * 4);
     let rng = storage("rng", tgt_px * 4);
 
-    // Random initial field at the coarsest level, from the CPU engine's generator.
-    let mut rand = GlibcRand::new(params.seed);
-    let init_nnf = nnf_init_random(phases[0].target, phases[0].source, phases[0].patch_size, &mut rand);
+    // The initial field: the warm start's at its first level, or a random field at the coarsest
+    // level from the CPU engine's generator.
+    let init_nnf = match &extras.warm_start {
+        Some(w) => {
+            let ph = &phases[first_level];
+            w.field_at_level(ph.target, source_size, ph.source, ph.patch_size)
+        }
+        None => {
+            let mut rand = GlibcRand::new(params.seed);
+            nnf_init_random(phases[0].target, phases[0].source, phases[0].patch_size, &mut rand)
+        }
+    };
     queue.write_buffer(&nnf[0], 0, bytemuck::cast_slice(init_nnf.data()));
+
+    // The final vote's errors, for a 16-bit vote of the final field.
+    let vote_err = extras.style16.as_ref().map(|_| storage("vote errors", tgt_px * 4));
 
     // Uniforms: one slot per phase, and one per (level, resampled image).
     let align = limits.min_uniform_buffer_offset_alignment as usize;
@@ -739,7 +768,9 @@ fn run(
         Cost::simple(phases[finest].target, 4),
     );
     let mut last_kernels = &*kernels;
-    for (pi, ph) in phases.iter().enumerate() {
+    // Whether the latest vote was weighted (with the errors in `err`).
+    let mut weighted_vote = false;
+    for (pi, ph) in phases.iter().enumerate().filter(|(_, ph)| ph.level >= first_level) {
         let k = match &kernels_3x3 {
             Some(k3) if ph.patch_size != params.patch_size => &**k3,
             _ => &*kernels,
@@ -756,7 +787,7 @@ fn run(
                 let roff = ((ph.level * resample_jobs.len() + j) * rslot) as u32;
                 sub.dispatch_groups(resample, g, roff, groups, Cost::simple(out, 16 * words as u64));
             }
-            if ph.level > 0 {
+            if ph.level > first_level {
                 sub.dispatch(&k.upscale_nnf, &groups[cs][cn], off, tsz, Cost::simple(tsz, 4));
                 cn ^= 1;
             }
@@ -767,6 +798,7 @@ fn run(
         }
         sub.dispatch(&k.vote_plain, &groups[cs][cn], off, tsz, cost.vote(tsz, p));
         cs ^= 1;
+        weighted_vote = false;
         if use_mask {
             sub.dispatch(&k.clear_mask, &groups[cs][cn], off, tsz, Cost::simple(tsz, 1));
         }
@@ -801,11 +833,17 @@ fn run(
             };
             sub.dispatch(vote, &groups[cs][cn], off, tsz, cost.vote(tsz, p));
             cs ^= 1;
+            weighted_vote = sched.vote_mode == VoteMode::Weighted;
             if use_mask && vote_iter + 1 < num_sv {
                 sub.dispatch(&k.eval_mask, &groups[cs][cn], off, tsz, Cost::simple(tsz, cost.style_words));
                 sub.dispatch(&k.dilate_mask, &groups[cs][cn], off, tsz, Cost::simple(tsz, (p * p) as u64));
             }
         }
+    }
+    let err_bytes = tgt_px * 4;
+    if let Some(v) = &vote_err {
+        // Kept before the error evaluation below overwrites them.
+        sub.copy(&err, v, err_bytes);
     }
     if params.return_errors {
         // Patch errors of the final field against the final image (now the current style).
@@ -825,7 +863,6 @@ fn run(
     let (tw, th) = target_size;
     let style_bytes = tgt_px * sw4;
     let nnf_bytes = tgt_px * 8;
-    let err_bytes = tgt_px * 4;
     let staging = |label: &str, size: u64| {
         device.create_buffer(&wgpu::BufferDescriptor {
             label: Some(label),
@@ -837,16 +874,20 @@ fn run(
     let style_out = staging("style readback", style_bytes);
     let nnf_out = staging("NNF readback", nnf_bytes);
     let err_out = params.return_errors.then(|| staging("error readback", err_bytes));
+    let vote_err_out = vote_err.as_ref().filter(|_| weighted_vote).map(|_| staging("vote error readback", err_bytes));
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("readback") });
     encoder.copy_buffer_to_buffer(&style[cs], 0, &style_out, 0, style_bytes);
     encoder.copy_buffer_to_buffer(&nnf[cn], 0, &nnf_out, 0, nnf_bytes);
     if let Some(e) = &err_out {
         encoder.copy_buffer_to_buffer(&err, 0, e, 0, err_bytes);
     }
+    if let (Some(v), Some(out)) = (&vote_err, &vote_err_out) {
+        encoder.copy_buffer_to_buffer(v, 0, out, 0, err_bytes);
+    }
     queue.submit([encoder.finish()]);
 
     let readbacks: Vec<&wgpu::Buffer> =
-        [Some(&style_out), Some(&nnf_out), err_out.as_ref()].into_iter().flatten().collect();
+        [Some(&style_out), Some(&nnf_out), err_out.as_ref(), vote_err_out.as_ref()].into_iter().flatten().collect();
     let (tx, rx) = mpsc::channel();
     for b in &readbacks {
         let tx = tx.clone();
@@ -877,6 +918,23 @@ fn run(
         }
         None => None,
     };
+    // The 16-bit result, voted on the CPU from the final field (and the final vote's errors).
+    let image16 = match &extras.style16 {
+        Some(s16) => {
+            let mut out = Image16::new(tw, th, ns);
+            let patch = phases[phases.len() - 1].patch_size;
+            match &vote_err_out {
+                Some(b) => {
+                    let view = b.get_mapped_range(..).map_err(|e| GpuError::Wgpu(e.to_string()))?;
+                    let errors: &[f32] = bytemuck::cast_slice(&view);
+                    vote_weighted16(&mut out, s16, &nnf, errors, patch, VoteRounding::Nearest);
+                }
+                None => vote_plain16(&mut out, s16, &nnf, patch, VoteRounding::Nearest),
+            }
+            Some(out)
+        }
+        None => None,
+    };
     if timing_enabled() {
         eprintln!(
             "gpu: setup {:.1} ms, synthesis {:.1} ms ({} phases, {} submissions)",
@@ -886,7 +944,7 @@ fn run(
             sub.submissions
         );
     }
-    Ok((SynthesisOutput { image, nnf, errors }, sub.submissions))
+    Ok((SynthesisOutput { image, nnf, errors, image16 }, sub.submissions))
 }
 
 #[cfg(test)]

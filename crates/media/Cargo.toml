@@ -1,0 +1,12 @@
+[package]
+name = "freesynth-media"
+description = "Video and image I/O for FreeSynth: ffmpeg over pipes, colour tags, frame indexes, 8/16-bit PNG"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+freesynth-core = { version = "0.1.0", path = "../core" }
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.152"

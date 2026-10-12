@@ -1,6 +1,6 @@
 //! The compute device: synthesis and optical flow on one shared GPU device, or on the CPU.
 
-use freesynth_core::{Engine, Params, SynthesisInput, SynthesisOutput};
+use freesynth_core::{Engine, Params, SynthesisExtras, SynthesisInput, SynthesisOutput};
 use freesynth_flow::cpu::CpuDis;
 use freesynth_flow::{DisParams, FlowEstimator};
 
@@ -50,6 +50,19 @@ pub trait Synthesizer: Sync {
 
     /// Synthesizes `input`. Called from several threads at once.
     fn synthesize(&self, input: &SynthesisInput, params: &Params) -> Result<SynthesisOutput, VideoError>;
+
+    /// Synthesizes `input` with extra inputs ([`SynthesisExtras`]). The default implementation
+    /// calls [`synthesize`](Self::synthesize) and so ignores a warm start (which only saves
+    /// time) and a 16-bit style (the renderer then widens the 8-bit result, losing the extra
+    /// precision).
+    fn synthesize_with(
+        &self,
+        input: &SynthesisInput,
+        params: &Params,
+        _extras: &SynthesisExtras,
+    ) -> Result<SynthesisOutput, VideoError> {
+        self.synthesize(input, params)
+    }
 }
 
 /// Creates optical flow estimators. Implemented by [`ComputeDevice`].
@@ -167,11 +180,21 @@ impl Synthesizer for ComputeDevice {
     }
 
     fn synthesize(&self, input: &SynthesisInput, params: &Params) -> Result<SynthesisOutput, VideoError> {
-        match &self.kind {
+        self.synthesize_with(input, params, &SynthesisExtras::default())
+    }
+
+    fn synthesize_with(
+        &self,
+        input: &SynthesisInput,
+        params: &Params,
+        extras: &SynthesisExtras,
+    ) -> Result<SynthesisOutput, VideoError> {
+        let out = match &self.kind {
             #[cfg(feature = "gpu")]
-            Kind::Gpu(g) => g.synth.synthesize(input, params).map_err(|e| VideoError::Synthesis(e.to_string())),
-            Kind::Cpu => freesynth_core::synthesize(input, params).map_err(|e| VideoError::Synthesis(e.to_string())),
-        }
+            Kind::Gpu(g) => g.synth.synthesize_with(input, params, extras).map_err(|e| e.to_string()),
+            Kind::Cpu => freesynth_core::synthesize_with(input, params, extras).map_err(|e| e.to_string()),
+        };
+        out.map_err(VideoError::Synthesis)
     }
 }
 

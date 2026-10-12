@@ -13,18 +13,32 @@
 //! | mask (optional) | the painting's alpha | mask frame `t` |
 //!
 //! Positions come from `freesynth-flow`'s anchored tracker; they are encoded into 8-bit guide
-//! channels ([`guides::encode_positions`]), and can be weighted per pixel by the tracker's
-//! confidence ([`VideoParams::gate_mapping`]).
+//! channels ([`guides::encode_positions`]). Guides can be weighted per pixel by how far they can
+//! be trusted: the mapping guide by the tracker's confidence ([`VideoParams::gate_mapping`], on
+//! by default) and the temporal guide by the forward-backward consistency of its flow
+//! ([`VideoParams::gate_temporal`]).
 //!
 //! # Scheduling
 //!
 //! Each keyframe's own frame is synthesized once. Between two neighbouring keyframes a forward
 //! and a backward chain run, each only across that interval, and their results are blended
-//! ([`BlendMode`]). Before the first and after the last keyframe a single chain runs (see
+//! ([`BlendMode`]): by default with the adaptive blend, which keeps per pixel the pass with the
+//! lower synthesis error and works in the gradient domain, so the middle of an interval keeps
+//! its detail; the linear crossfade remains available ([`VideoParams::classic`]), and hosts can
+//! plug in their own [`Blender`]. Before the first and after the last keyframe a single chain runs (see
 //! [`plan`]). All chains are independent, so they run at the same time on one device: a
 //! [`ComputeDevice`] shares one wgpu device between the synthesis engine and the flow
 //! estimator, or runs both on the CPU. Optical flow is computed once per frame pair and shared
 //! by every chain that needs it ([`FlowBank`]).
+//!
+//! # Options
+//!
+//! - **Warm start** ([`VideoParams::warm_start`], off by default): each frame of a chain starts
+//!   from the previous frame's final nearest-neighbour field, moved along the optical flow, and
+//!   runs only the finest pyramid levels.
+//! - **16-bit output** ([`Renderer::keyframes16`]): with 16-bit keyframe paintings, the search
+//!   still runs at 8 bits, but every synthesis's final field is voted again from the 16-bit
+//!   painting, passes are blended at 16 bits and frames reach [`FrameSink::write16`].
 //!
 //! # Memory
 //!
@@ -61,23 +75,24 @@ mod frames;
 pub mod guides;
 mod params;
 pub mod plan;
+mod poisson;
 mod progress;
 mod render;
 pub mod resources;
 mod store;
 
-pub use crate::blend::{BlendMode, blend};
+pub use crate::blend::{BlendMode, BlendSettings, Blender, BuiltinBlender, PassFrame, blend};
 pub use crate::device::{Backend, ComputeDevice, FlowProvider, Synthesizer};
 pub use crate::error::VideoError;
 pub use crate::flowbank::{FlowBank, FlowStats};
 pub use crate::frames::{
     FrameCache, FrameSink, FrameSource, ImageSequence, ImageSequenceWriter, MemoryFrames, MemorySink, pattern_path,
 };
-pub use crate::params::{FlowBackend, GuideWeights, KeyframeOutput, RenderOptions, VideoParams};
+pub use crate::params::{FlowBackend, GuideWeights, KeyframeOutput, RenderOptions, VideoParams, WarmStartSettings};
 pub use crate::plan::Plan;
 pub use crate::progress::{CancelToken, Progress};
-pub use crate::render::{Keyframe, RenderStats, Renderer, Shot};
-pub use crate::resources::{ResourcePlan, default_memory_budget};
+pub use crate::render::{Keyframe, Keyframe16, RenderStats, Renderer, Shot};
+pub use crate::resources::{ResourcePlan, ShotFormat, default_memory_budget};
 pub use crate::store::{SpillKey, SpillStore, StoreStats};
 
 #[cfg(test)]

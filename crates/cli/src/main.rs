@@ -1,11 +1,14 @@
-//! `freesynth`: command-line front end compatible with the 2019 `ebsynth` tool.
+//! `freesynth`: the command-line front end.
 //!
-//! Accepts the same options and error messages as the original (`ebsynth.cpp`), plus a few
-//! FreeSynth extensions listed in the usage text. By default it runs FreeSynth's default preset
+//! Run with options (`freesynth -style ... -guide ... -output ...`), it is compatible with the
+//! 2019 `ebsynth` tool: same options and error messages as the original (`ebsynth.cpp`), plus a
+//! few FreeSynth extensions listed in the usage text. Run with a command (`render`, `video`,
+//! `new`, `import-ebs`, `devices`), it works on keyframe video projects (see `commands`). By default it runs FreeSynth's default preset
 //! (faster schedule, weighted voting, rounded votes); `-compat` restores the original defaults,
 //! and every explicit option overrides the preset.
 
 mod backend;
+mod commands;
 
 use std::process::ExitCode;
 
@@ -18,7 +21,15 @@ use crate::backend::Backend;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
-    ExitCode::from(run(&args))
+    // A first argument that is not an option names a subcommand; `--help` and `--version` are
+    // not ebsynth options, so they describe the whole tool. Everything else is the
+    // ebsynth-compatible single-image mode, unchanged.
+    let code = match args.get(1).map(String::as_str) {
+        Some(a) if !a.starts_with('-') => commands::run(&args),
+        Some("--help" | "-h" | "--version" | "-V") => commands::run(&args),
+        _ => run(&args),
+    };
+    ExitCode::from(code)
 }
 
 fn print_usage(program: &str) {
@@ -62,6 +73,13 @@ fn print_usage(program: &str) {
     println!("                        implies -compat unless -preset is given; truncates votes)");
     println!("  -dumpnnf <file.nnf>   also write the final nearest-neighbour field (FSNNF1 format)");
     println!("  -dumperror <file.pfm> also write the final per-pixel patch error (greyscale PFM)");
+    println!();
+    println!("video commands (see {program} <command> --help):");
+    println!("  render <project.fsyn>   render a project (only what changed since the last render)");
+    println!("  video                   stylize a video from keyframes without a project file");
+    println!("  new <project.fsyn>      create a project file");
+    println!("  import-ebs <file.ebs>   convert an EbSynth project");
+    println!("  devices                 list GPU adapters and ffmpeg");
     println!();
 }
 

@@ -1,6 +1,6 @@
 [package]
 name = "freesynth-cli"
-description = "ebsynth-compatible command-line front end for FreeSynth"
+description = "Command-line front end for FreeSynth: ebsynth-compatible single images, and keyframe video projects"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,5 +10,15 @@ name = "freesynth"
 path = "src/main.rs"
 
 [dependencies]
+clap = { version = "4.6.7", features = ["derive"] }
+freesynth = { version = "0.1.0", path = "../freesynth" }
 freesynth-core = { version = "0.1.0", path = "../core" }
 freesynth-gpu = { version = "0.1.0", path = "../gpu" }
+freesynth-media = { version = "0.1.0", path = "../media" }
+serde_json = "1.0.152"
+
+[target.'cfg(unix)'.dependencies]
+signal-hook = { version = "0.4.1", default-features = false }
+
+[dev-dependencies]
+freesynth-scenes = { version = "0.1.0", path = "../scenes" }

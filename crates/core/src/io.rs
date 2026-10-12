@@ -6,7 +6,9 @@
 //!
 //! Decoding uses the `image` crate. Lossless formats (PNG, BMP, TGA) give the same pixels as
 //! stb_image and 16-bit images are reduced the same way; JPEG pixels can differ slightly because
-//! decoders use different IDCTs and chroma upsampling.
+//! decoders use different IDCTs and chroma upsampling. [`load_rgba16`] keeps all 16 bits instead
+//! (for a high-precision style, see [`SynthesisExtras::style16`](crate::SynthesisExtras::style16)),
+//! and [`save_png16`] writes them.
 //!
 //! Nearest-neighbour fields can be stored in a small binary format (see [`write_nnf`]), and
 //! per-pixel float maps such as patch errors as greyscale PFM (see [`write_pfm`]).
@@ -17,7 +19,7 @@ use std::path::Path;
 use image::{DynamicImage, ExtendedColorType, ImageError, ImageFormat, ImageReader};
 
 use crate::error::{Error, invalid};
-use crate::image::{Image, Nnf};
+use crate::image::{Image, Image16, Nnf};
 
 /// Loads an image file as 8-bit RGBA, like `stbi_load(path, ..., 4)`.
 ///
@@ -55,6 +57,32 @@ pub fn dynamic_to_rgba(img: DynamicImage) -> Image {
     Image::from_raw(w, h, 4, data)
 }
 
+/// Loads an image file as 16-bit RGBA, keeping 16-bit samples as they are. 8-bit images are
+/// widened exactly (`v * 257`), so [`Image16::to_image`] of the result equals [`load_rgba`] for
+/// them. Format detection and grey expansion follow [`load_rgba`].
+pub fn load_rgba16(path: impl AsRef<Path>) -> Result<Image16, Error> {
+    let path = path.as_ref();
+    let bytes = std::fs::read(path).map_err(|e| Error::Image(ImageError::IoError(e)))?;
+    decode_rgba16(&bytes, ImageFormat::from_path(path).ok())
+}
+
+/// Decodes an in-memory image file as 16-bit RGBA with the same rules as [`load_rgba16`].
+pub fn decode_rgba16(bytes: &[u8], fallback: Option<ImageFormat>) -> Result<Image16, Error> {
+    let mut reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format().map_err(ImageError::IoError)?;
+    if reader.format().is_none()
+        && let Some(f) = fallback
+    {
+        reader.set_format(f);
+    }
+    Ok(dynamic_to_rgba16(reader.decode()?))
+}
+
+/// Converts a decoded image to 16-bit RGBA with the same rules as [`load_rgba16`].
+pub fn dynamic_to_rgba16(img: DynamicImage) -> Image16 {
+    let (w, h) = (img.width() as usize, img.height() as usize);
+    Image16::from_raw(w, h, 4, img.to_rgba16().into_raw())
+}
+
 /// Number of informative channels of an RGBA image (`evalNumChannels`): 1 if every pixel is grey
 /// (`r == g == b`), else 3; plus 1 if any pixel has alpha < 255.
 pub fn eval_num_channels(rgba: &Image) -> usize {
@@ -89,12 +117,24 @@ pub fn channel_map(num_channels: usize) -> &'static [usize] {
 /// Extracts `num_channels` channels (see [`channel_map`]) from an RGBA image.
 pub fn select_channels(rgba: &Image, num_channels: usize) -> Image {
     assert_eq!(rgba.channels(), 4, "select_channels expects RGBA");
+    let data = select(rgba.data(), num_channels);
+    Image::from_raw(rgba.width(), rgba.height(), channel_map(num_channels).len(), data)
+}
+
+/// [`select_channels`] for a 16-bit RGBA image.
+pub fn select_channels16(rgba: &Image16, num_channels: usize) -> Image16 {
+    assert_eq!(rgba.channels(), 4, "select_channels16 expects RGBA");
+    let data = select(rgba.data(), num_channels);
+    Image16::from_raw(rgba.width(), rgba.height(), channel_map(num_channels).len(), data)
+}
+
+fn select<T: Copy>(rgba: &[T], num_channels: usize) -> Vec<T> {
     let map = channel_map(num_channels);
-    let mut data = Vec::with_capacity(rgba.width() * rgba.height() * map.len());
-    for px in rgba.data().as_chunks::<4>().0 {
+    let mut data = Vec::with_capacity(rgba.len() / 4 * map.len());
+    for px in rgba.as_chunks::<4>().0 {
         data.extend(map.iter().map(|&c| px[c]));
     }
-    Image::from_raw(rgba.width(), rgba.height(), map.len(), data)
+    data
 }
 
 fn color_type(img: &Image) -> Result<ExtendedColorType, Error> {
@@ -112,6 +152,21 @@ fn color_type(img: &Image) -> Result<ExtendedColorType, Error> {
 pub fn save_png(img: &Image, path: impl AsRef<Path>) -> Result<(), Error> {
     let color = color_type(img)?;
     image::save_buffer_with_format(path, img.data(), img.width() as u32, img.height() as u32, color, ImageFormat::Png)?;
+    Ok(())
+}
+
+/// Saves a 1- to 4-channel 16-bit image (grey, grey+alpha, RGB, RGBA) as a 16-bit PNG.
+pub fn save_png16(img: &Image16, path: impl AsRef<Path>) -> Result<(), Error> {
+    let color = match img.channels() {
+        1 => ExtendedColorType::L16,
+        2 => ExtendedColorType::La16,
+        3 => ExtendedColorType::Rgb16,
+        4 => ExtendedColorType::Rgba16,
+        n => return invalid(format!("cannot save an image with {n} channels")),
+    };
+    // The encoder takes native-endian sample bytes.
+    let bytes: Vec<u8> = img.data().iter().flat_map(|v| v.to_ne_bytes()).collect();
+    image::save_buffer_with_format(path, &bytes, img.width() as u32, img.height() as u32, color, ImageFormat::Png)?;
     Ok(())
 }
 
@@ -335,6 +390,31 @@ mod tests {
             assert_eq!(select_channels(&load_rgba(&bare).unwrap(), nc), img);
         }
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn sixteen_bit_png_round_trip() {
+        let dir = scratch_dir("png16");
+        std::fs::create_dir_all(&dir).unwrap();
+        let data: Vec<u16> = (0..3 * 2 * 4).map(|i| (i * 2731 + 7) as u16).collect();
+        let img = Image16::from_raw(3, 2, 4, data);
+        let path = dir.join("a.png");
+        save_png16(&img, &path).unwrap();
+        let back = load_rgba16(&path).unwrap();
+        assert_eq!(back, img);
+        // The 8-bit loader drops the low byte, as stb_image does.
+        let eight = load_rgba(&path).unwrap();
+        assert!(eight.data().iter().zip(img.data()).all(|(&e, &v)| u16::from(e) == v >> 8));
+        // 8-bit files are widened exactly.
+        let small = rgba(&[[1, 2, 3, 255], [200, 100, 0, 7]]);
+        save_png(&small, dir.join("b.png")).unwrap();
+        let wide = load_rgba16(dir.join("b.png")).unwrap();
+        assert_eq!(wide, Image16::from_image(&small));
+        assert_eq!(select_channels16(&wide, 3).data(), &[257, 514, 771, 200 * 257, 100 * 257, 0]);
+        let grey = Image16::from_raw(1, 1, 1, vec![40000]);
+        save_png16(&grey, dir.join("c.png")).unwrap();
+        assert_eq!(load_rgba16(dir.join("c.png")).unwrap().data(), &[40000, 40000, 40000, 65535]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

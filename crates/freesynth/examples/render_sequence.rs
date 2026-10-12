@@ -1,4 +1,6 @@
-//! Renders a keyframe video shot from an image sequence and painted keyframes.
+//! Renders a keyframe video shot from an image sequence and painted keyframes. It renders the
+//! whole shot on every run, without the render cache, so that it can be used for measurements
+//! (the `freesynth render` command renders incrementally).
 //!
 //! ```text
 //! cargo run --release -p freesynth --example render_sequence -- \
@@ -33,7 +35,9 @@ use std::process::ExitCode;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
-use freesynth::{CancelToken, FlowBackend, Progress, Project, RenderStats, Session, SessionOptions};
+use freesynth::{
+    CancelToken, FlowBackend, ImageSequenceWriter, Progress, Project, RenderStats, Session, SessionOptions,
+};
 
 fn usage() -> ExitCode {
     eprintln!(
@@ -192,7 +196,21 @@ fn main() -> ExitCode {
         _ => {}
     };
     let progress: Option<&(dyn Fn(&Progress) + Sync)> = if quiet { None } else { Some(&report) };
-    let stats = match session.render(&project, progress, &CancelToken::new()) {
+    // The whole shot every time, without the render cache's bookkeeping (for measurements).
+    let out = project.resolve(&project.output.frames);
+    let sink = if out.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.contains('#')) {
+        ImageSequenceWriter::new(out)
+    } else {
+        ImageSequenceWriter::into_dir(out)
+    };
+    let sink = match sink {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::from(2);
+        }
+    };
+    let stats = match session.render_to(&project, None, &sink, progress, &CancelToken::new()) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("render failed: {e}");

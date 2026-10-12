@@ -70,13 +70,28 @@ confidence map from forward-backward consistency.
 
 ## Video
 
-`freesynth-video` stylizes a shot from one or more painted keyframes. Each keyframe is propagated
-forward and backward up to its neighbouring keyframes. The guides come from the input frames, from
-position fields built with `freesynth-flow`, and from the previous output frame, and the two passes
-of each interval are blended. Chains run in parallel on one GPU device, and frames beyond a memory
-budget spill to disk. The `freesynth` crate wraps this in projects and render sessions with
-progress reporting and cancellation. To render an image sequence:
+`freesynth video` stylizes a clip from painted keyframes in one go:
 
 ```bash
-cargo run --release -p freesynth --example render_sequence -- --help
+target/release/freesynth video -i clip.mov --key 0=paint_000.png --key 99=paint_099.png -o out.mov
 ```
+
+Each keyframe is propagated forward and backward up to its neighbouring keyframes. The guides come
+from the input frames, from position fields built with `freesynth-flow`, and from the previous
+output frame; the positional guide is weighted by how reliably each pixel was tracked. Where two
+keyframes overlap, the passes are blended in the gradient domain, preferring at each pixel the pass
+with the lower patch error; `--blend linear` crossfades instead. Video files are read and written
+through ffmpeg, which must be installed, and their colour tags are kept. `--bit-depth 16` writes
+16-bit output.
+
+For longer work, keep the settings in a project file:
+
+```bash
+target/release/freesynth new -i clip.mov --keys paintings/ project.fsyn
+target/release/freesynth render project.fsyn
+```
+
+`render` only re-renders frames whose inputs changed, and `render --watch` re-renders as soon as a
+keyframe painting is saved. `freesynth import-ebs` converts EbSynth `.ebs` projects, and
+`freesynth devices` lists the GPUs and the ffmpeg in use. The `freesynth` crate offers the same
+projects and render sessions as a library.

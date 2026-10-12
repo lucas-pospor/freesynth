@@ -6,7 +6,7 @@ use freesynth_core::Params;
 use freesynth_flow::track::TrackParams;
 use freesynth_flow::{DisParams, Preset as FlowPreset};
 
-use crate::blend::BlendMode;
+use crate::blend::{BlendMode, BlendSettings};
 use crate::error::{VideoError, invalid};
 
 /// Total weight of each guide layer. Within a layer the weight is split evenly over the layer's
@@ -82,6 +82,24 @@ impl std::str::FromStr for KeyframeOutput {
     }
 }
 
+/// The video warm start ([`VideoParams::warm_start`]): every frame of a chain starts from the
+/// previous frame's final nearest-neighbour field moved along the optical flow, and runs only
+/// the finest pyramid levels with fewer search/vote iterations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WarmStartSettings {
+    /// Finest pyramid levels run (at least 1).
+    pub levels: usize,
+    /// Search/vote iterations at each of those levels (at least 1).
+    pub search_vote_iters: usize,
+}
+
+impl Default for WarmStartSettings {
+    /// The 2 finest levels with 3 search/vote iterations each.
+    fn default() -> Self {
+        Self { levels: 2, search_vote_iters: 3 }
+    }
+}
+
 /// Everything that determines how a shot looks.
 #[derive(Clone, Debug, PartialEq)]
 pub struct VideoParams {
@@ -97,10 +115,23 @@ pub struct VideoParams {
     /// Scale the mapping guide per pixel by the tracker's confidence, so that it stops pulling
     /// where the tracked position is unreliable (disocclusions, broken tracks).
     pub gate_mapping: bool,
+    /// Scale the temporal guide per pixel by the forward-backward consistency of the one-step
+    /// flow that warps the previous output, so that it stops pulling where that warp is wrong
+    /// (content that was hidden in the previous frame, flow errors). Costs one extra flow per
+    /// frame (the reverse direction).
+    pub gate_temporal: bool,
+    /// With [`gate_temporal`](Self::gate_temporal): pixels by which regions that fail the
+    /// consistency check grow before the temporal guide is switched off there.
+    pub temporal_gate_erosion: usize,
     /// How the two passes of an interval are combined.
     pub blend: BlendMode,
+    /// Settings of the adaptive blend ([`BlendMode::Adaptive`]).
+    pub blending: BlendSettings,
     /// What is written at keyframe frames.
     pub keyframe_output: KeyframeOutput,
+    /// Start each frame of a chain from the previous frame's result instead of from scratch: a
+    /// speed option (`None`: every frame runs the full pyramid).
+    pub warm_start: Option<WarmStartSettings>,
 }
 
 impl VideoParams {
@@ -115,8 +146,12 @@ impl VideoParams {
             flow: DisParams::preset(FlowPreset::Medium),
             tracking: TrackParams::default(),
             gate_mapping: false,
+            gate_temporal: false,
+            temporal_gate_erosion: 0,
             blend: BlendMode::Linear,
+            blending: BlendSettings::default(),
             keyframe_output: KeyframeOutput::Synthesized,
+            warm_start: None,
         }
     }
 
@@ -125,16 +160,29 @@ impl VideoParams {
         self.weights.validate()?;
         self.flow.validate()?;
         self.tracking.validate()?;
+        self.blending.validate()?;
+        if let Some(w) = self.warm_start
+            && (w.levels == 0 || w.search_vote_iters == 0)
+        {
+            return invalid("a warm start needs at least one level and one search/vote iteration");
+        }
         if self.synthesis.return_errors {
-            return invalid("per-pixel error output is not used by the video pipeline");
+            return invalid(
+                "synthesis.return_errors must be off: the renderer asks for errors when the blend needs them",
+            );
         }
         Ok(())
     }
 }
 
 impl Default for VideoParams {
+    /// The recommended look: the classic guide weights with the mapping guide gated by the
+    /// tracker's confidence, and the [adaptive](BlendMode::Adaptive) blend between passes.
+    /// Compared with [`classic`](VideoParams::classic) it keeps the style attached to tracked
+    /// content without dragging it into regions whose track was lost, and it keeps the passes'
+    /// detail in the middle of keyframe intervals instead of crossfading it away.
     fn default() -> Self {
-        Self::classic()
+        Self { gate_mapping: true, blend: BlendMode::Adaptive, ..Self::classic() }
     }
 }
 
@@ -201,9 +249,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn classic_preset_is_valid() {
-        let p = VideoParams::default();
+    fn presets_are_valid() {
+        let d = VideoParams::default();
+        d.validate().unwrap();
+        assert!(d.gate_mapping && !d.gate_temporal);
+        assert_eq!(d.blend, BlendMode::Adaptive);
+        let p = VideoParams::classic();
         p.validate().unwrap();
+        assert!(!p.gate_mapping && p.blend == BlendMode::Linear);
         assert_eq!(p.weights, GuideWeights { style: 1.0, video: 4.0, temporal: 1.0, mapping: 10.0, mask: 1.0 });
         let mut bad = p.clone();
         bad.weights.mapping = -1.0;
@@ -215,5 +268,10 @@ mod tests {
             assert_eq!(k.name().parse::<KeyframeOutput>().unwrap(), k);
         }
         assert!("both".parse::<KeyframeOutput>().is_err());
+        let cold = WarmStartSettings { levels: 0, ..WarmStartSettings::default() };
+        let bad = VideoParams { warm_start: Some(cold), ..VideoParams::default() };
+        assert!(bad.validate().is_err());
+        let ok = VideoParams { warm_start: Some(WarmStartSettings::default()), ..VideoParams::default() };
+        ok.validate().unwrap();
     }
 }

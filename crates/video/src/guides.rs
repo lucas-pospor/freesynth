@@ -7,10 +7,14 @@
 //! - the **temporal** guide is the chain's previous output warped to the current frame by optical
 //!   flow ([`warp_rgba`]);
 //! - the **mask** guide pairs the keyframe's alpha ([`alpha_as_gray`]) with the frame's mask.
+//!
+//! Two per-pixel weight maps switch guides off where they are unreliable: the tracker's
+//! confidence for the mapping guide ([`confidence_weights`]) and the forward-backward consistency
+//! of the one-step flow for the temporal guide ([`flow_consistency_weights`]).
 
-use freesynth_core::{Image, io};
+use freesynth_core::{Image, Nnf, io};
 use freesynth_flow::FlowField;
-use freesynth_flow::track::{ConfidenceMap, PositionField};
+use freesynth_flow::track::{ConfidenceMap, ForwardBackward, PositionField, erode};
 use rayon::prelude::*;
 
 /// Encodes a position field as an RGBA mapping guide: `R = trunc(x / (S - 1) * 255)`,
@@ -58,6 +62,26 @@ pub fn warp_rgba(image: &Image, flow: &FlowField) -> Image {
     Image::from_raw(w, h, 4, data)
 }
 
+/// A nearest-neighbour field moved along `flow` (the warm start of a chain's next frame):
+/// `out(x) = nnf(round(x + flow(x)))`, with sample positions clamped to the field. The entries
+/// are source (keyframe) positions, which do not move.
+///
+/// # Panics
+/// If the sizes differ.
+pub fn warp_nnf(nnf: &Nnf, flow: &FlowField) -> Nnf {
+    let (w, h) = flow.size();
+    assert_eq!((nnf.width(), nnf.height()), (w, h), "field and flow differ in size");
+    let mut out = Nnf::new(w, h);
+    out.data_mut().par_chunks_mut(w).zip(flow.data().par_chunks(w)).enumerate().for_each(|(y, (row, f))| {
+        for (x, (v, d)) in row.iter_mut().zip(f).enumerate() {
+            let sx = (x as f32 + d[0]).round().clamp(0.0, (w - 1) as f32) as usize;
+            let sy = (y as f32 + d[1]).round().clamp(0.0, (h - 1) as f32) as usize;
+            *v = nnf.get(sx, sy);
+        }
+    });
+    out
+}
+
 /// Expands a 1- to 4-channel image (grey, grey + alpha, RGB, RGBA, as kept by the engine's
 /// channel selection) to RGBA.
 ///
@@ -92,6 +116,28 @@ pub fn confidence_weights(confidence: &ConfidenceMap) -> Image {
     let (w, h) = confidence.size();
     let data = confidence.data().iter().map(|&c| (c.clamp(0.0, 1.0) * 255.0).round() as u8).collect();
     Image::from_raw(w, h, 1, data)
+}
+
+/// Per-pixel weights for the temporal guide of frame `t` (one channel, 255 or 0): 255 where the
+/// one-step flow passes the forward-backward `check`, 0 where it fails, with failed regions grown
+/// by `erode_radius` pixels. `to_prev` is the flow from frame `t` to the previous frame of the
+/// chain (the one that warps the previous output), `from_prev` the flow back.
+///
+/// The previous output warped to `t` is wrong exactly where this check fails: content that was
+/// hidden in the previous frame (disocclusions) and flow errors. There the temporal guide would
+/// pull the synthesis towards smeared or misplaced strokes, so it is switched off.
+///
+/// # Panics
+/// If the flows differ in size.
+pub fn flow_consistency_weights(
+    to_prev: &FlowField,
+    from_prev: &FlowField,
+    check: &ForwardBackward,
+    erode_radius: usize,
+) -> Image {
+    let (w, h) = to_prev.size();
+    let consistent = erode(&check.check(to_prev, from_prev), w, h, erode_radius);
+    Image::from_raw(w, h, 1, consistent.into_iter().map(|ok| if ok { 255 } else { 0 }).collect())
 }
 
 /// True when the RGBA image has any pixel that is not fully opaque (it then has a meaningful
@@ -131,6 +177,15 @@ mod tests {
     }
 
     #[test]
+    fn field_warping_follows_the_flow_convention() {
+        let nnf = Nnf::from_raw(3, 2, (0..6).map(|i| [i, 10 + i]).collect());
+        // out(x) = nnf(x + 1): every entry takes its right neighbour's, clamped at the edge.
+        let out = warp_nnf(&nnf, &FlowField::constant(3, 2, [1.0, 0.0]));
+        assert_eq!(out.data(), &[[1, 11], [2, 12], [2, 12], [4, 14], [5, 15], [5, 15]]);
+        assert_eq!(warp_nnf(&nnf, &FlowField::constant(3, 2, [0.4, -0.3])), nnf);
+    }
+
+    #[test]
     fn channel_expansion() {
         let grey = Image::from_raw(1, 1, 1, vec![7]);
         assert_eq!(to_rgba(&grey).data(), &[7, 7, 7, 255]);
@@ -144,5 +199,28 @@ mod tests {
         assert!(!has_alpha(&to_rgba(&rgb)));
         let c = ConfidenceMap::from_vec(2, 1, vec![0.0, 1.0]);
         assert_eq!(confidence_weights(&c).data(), &[0, 255]);
+    }
+
+    #[test]
+    fn temporal_weights_follow_the_consistency_check() {
+        let (w, h) = (12, 8);
+        let to_prev = FlowField::constant(w, h, [1.0, 0.0]);
+        let mut from_prev = FlowField::constant(w, h, [-1.0, 0.0]);
+        let check = ForwardBackward::default();
+        let all = flow_consistency_weights(&to_prev, &from_prev, &check, 0);
+        // The last column maps outside the previous frame.
+        for y in 0..h {
+            for x in 0..w {
+                assert_eq!(all.pixel(x, y)[0], if x == w - 1 { 0 } else { 255 }, "({x}, {y})");
+            }
+        }
+        // A disagreeing pixel of the reverse flow fails its source pixel, and erosion grows it.
+        from_prev.data_mut()[3 * w + 6] = [5.0, 0.0];
+        let one = flow_consistency_weights(&to_prev, &from_prev, &check, 0);
+        assert_eq!(one.pixel(5, 3)[0], 0);
+        assert_eq!(one.pixel(4, 3)[0], 255);
+        let grown = flow_consistency_weights(&to_prev, &from_prev, &check, 1);
+        assert_eq!(grown.pixel(4, 2)[0], 0);
+        assert_eq!(grown.pixel(3, 3)[0], 255);
     }
 }

@@ -6,13 +6,14 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use freesynth_core::{Engine, Image, Nnf, Params, SynthesisInput, SynthesisOutput};
+use freesynth_core::{Engine, Image, Image16, Nnf, OmegaSync, Params, SynthesisInput, SynthesisOutput};
 use freesynth_flow::{DisParams, Preset as FlowPreset};
 use freesynth_scenes::{Scene, SceneParams, StyleFamily};
 use freesynth_video::resources::MAX_DEFAULT_PARALLEL;
 use freesynth_video::{
-    Backend, CancelToken, ComputeDevice, FrameSink, Keyframe, KeyframeOutput, MemoryFrames, MemorySink, Progress,
-    RenderOptions, RenderStats, Renderer, Shot, Synthesizer, VideoError, VideoParams,
+    Backend, BlendMode, Blender, CancelToken, ComputeDevice, FrameSink, Keyframe, Keyframe16, KeyframeOutput,
+    MemoryFrames, MemorySink, PassFrame, Progress, RenderOptions, RenderStats, Renderer, Shot, Synthesizer, VideoError,
+    VideoParams, WarmStartSettings,
 };
 
 fn rgba(rgb: &[u8], w: usize, h: usize) -> Image {
@@ -70,7 +71,7 @@ impl Synthesizer for SolidColour {
         let c = input.source_style.channels();
         let colour = input.source_style.pixel(0, 0).to_vec();
         let data = std::iter::repeat_n(colour, w * h).flatten().collect();
-        Ok(SynthesisOutput { image: Image::from_raw(w, h, c, data), nnf: Nnf::new(w, h), errors: None })
+        Ok(SynthesisOutput { image: Image::from_raw(w, h, c, data), nnf: Nnf::new(w, h), errors: None, image16: None })
     }
 }
 
@@ -111,6 +112,134 @@ fn renders_every_frame_once_and_blends_linearly() {
     }
     assert!(stats.flow.computed > 0);
     assert!(stats.flow.reused > 0, "the temporal guide reuses the tracker's flows");
+}
+
+/// A stand-in engine that returns the style itself and, when asked, a constant patch error that
+/// depends on the keyframe (its first pixel's red level / 100 as root-mean-square error).
+/// Records whether each call asked for errors.
+#[derive(Default)]
+struct StyleCopy {
+    asked: Mutex<Vec<(u8, bool)>>,
+}
+
+impl Synthesizer for StyleCopy {
+    fn engine(&self) -> Engine {
+        Engine::Cpu
+    }
+
+    fn synthesize(&self, input: &SynthesisInput, params: &Params) -> Result<SynthesisOutput, VideoError> {
+        let style = &input.source_style;
+        let red = style.pixel(0, 0)[0];
+        self.asked.lock().unwrap().push((red, params.return_errors));
+        let (w, h) = style.size();
+        let total: f32 = input.style_weights.iter().chain(&input.guide_weights).sum();
+        let rms = f32::from(red) / 100.0;
+        let errors = params.return_errors.then(|| vec![rms * rms * 25.0 * total; w * h]);
+        Ok(SynthesisOutput { image: style.clone(), nnf: Nnf::new(w, h), errors, image16: None })
+    }
+}
+
+/// What a [`Recorder`] saw for one frame: the position in the interval and the mean error of
+/// each pass, if it got errors.
+type Seen = (f32, Option<f32>, Option<f32>);
+
+/// A blender that records what it is given and returns pass A.
+struct Recorder {
+    errors: bool,
+    seen: Mutex<Vec<Seen>>,
+}
+
+impl Blender for Recorder {
+    fn needs_errors(&self) -> bool {
+        self.errors
+    }
+
+    fn blend(&self, a: PassFrame<'_>, b: PassFrame<'_>, alpha: f32) -> Result<Image, VideoError> {
+        let mean = |e: Option<&[f32]>| e.map(|e| e.iter().sum::<f32>() / e.len() as f32);
+        self.seen.lock().unwrap().push((alpha, mean(a.errors), mean(b.errors)));
+        Ok(a.image.clone())
+    }
+}
+
+#[test]
+fn blenders_get_the_engine_errors_they_ask_for() {
+    let (w, h) = (48, 32);
+    let (frames, _) = scene(w, h, 8);
+    let keyframes = vec![
+        Keyframe { frame: 2, style: solid(w, h, [100, 0, 0]) },
+        Keyframe { frame: 7, style: solid(w, h, [250, 0, 0]) },
+    ];
+    let shot = Shot { frames: &frames, keyframes, mask: None, range: None };
+    let device = ComputeDevice::cpu();
+    for wanted in [true, false] {
+        let engine = StyleCopy::default();
+        let recorder = Recorder { errors: wanted, seen: Mutex::new(Vec::new()) };
+        let sink = MemorySink::new();
+        Renderer::with_engines(&engine, &device, fast_params()).blender(&recorder).render(&shot, &sink).unwrap();
+        assert_eq!(sink.into_frames().len(), 8);
+        let mut seen = recorder.seen.into_inner().unwrap();
+        seen.sort_by(|x, y| x.0.total_cmp(&y.0));
+        // Frames 3 to 6 are blended, at a = 1/5 .. 4/5.
+        assert_eq!(seen.iter().map(|s| (s.0 * 5.0).round() as usize).collect::<Vec<_>>(), [1, 2, 3, 4]);
+        for (_, ea, eb) in seen {
+            if wanted {
+                // Pass A comes from keyframe 2 (red 100: error 1.0), pass B from keyframe 7 (2.5).
+                assert!((ea.unwrap() - 1.0).abs() < 0.01 && (eb.unwrap() - 2.5).abs() < 0.01, "{ea:?} {eb:?}");
+            } else {
+                assert!(ea.is_none() && eb.is_none());
+            }
+        }
+        // Errors are asked for exactly for the blended passes: not for keyframes, not for the
+        // chain before the first keyframe.
+        let asked = engine.asked.into_inner().unwrap();
+        assert_eq!(asked.len(), 2 + 2 + 2 * 4);
+        assert_eq!(asked.iter().filter(|a| a.1).count(), if wanted { 8 } else { 0 });
+    }
+}
+
+#[test]
+fn adaptive_blend_keeps_more_detail_than_the_crossfade() {
+    let (w, h) = (96, 64);
+    let (frames, truth) = scene(w, h, 9);
+    let keyframes =
+        vec![Keyframe { frame: 0, style: truth[0].clone() }, Keyframe { frame: 8, style: truth[8].clone() }];
+    let shot = Shot { frames: &frames, keyframes, mask: None, range: None };
+    let device = ComputeDevice::new(Backend::Cpu).unwrap();
+    // Per-band occupancy maps and a fixed band count make the CPU engine deterministic, so that
+    // the keyframe frames of the two renders can be compared exactly.
+    let synthesis = Params { omega_sync: OmegaSync::PerTile, num_bands: Some(4), ..Params::default() };
+    let render = |blend| {
+        let sink = MemorySink::new();
+        let params = VideoParams { blend, synthesis: synthesis.clone(), ..fast_params() };
+        Renderer::new(&device, params).render(&shot, &sink).unwrap();
+        sink.into_frames()
+    };
+    let (linear, adaptive) = (render(BlendMode::Linear), render(BlendMode::Adaptive));
+    assert_eq!(adaptive.len(), 9);
+    // Keyframe frames are not blended.
+    assert_eq!(adaptive[&0], linear[&0]);
+    assert_eq!(adaptive[&8], linear[&8]);
+    let detail = |img: &Image| {
+        let (mut e, nc) = (0.0, img.channels());
+        for y in 0..h {
+            for x in 0..w - 1 {
+                for c in 0..3 {
+                    let d =
+                        f64::from(img.data()[(y * w + x + 1) * nc + c]) - f64::from(img.data()[(y * w + x) * nc + c]);
+                    e += d * d;
+                }
+            }
+        }
+        e
+    };
+    let (dl, da) = (detail(&linear[&4]), detail(&adaptive[&4]));
+    assert!(da > 1.1 * dl, "middle frame detail: adaptive {da:.0} vs linear {dl:.0}");
+    // And it still follows the scene.
+    for t in 1..8 {
+        let err = mean_abs_diff(&adaptive[&t], &truth[t]);
+        let still = mean_abs_diff(&truth[0], &truth[t]).min(mean_abs_diff(&truth[8], &truth[t]));
+        assert!(err < still, "frame {t}: {err:.2} vs {still:.2} for an unmoved keyframe");
+    }
 }
 
 #[test]
@@ -417,6 +546,47 @@ fn a_panicking_sink_fails_the_render_instead_of_hanging() {
     }
 }
 
+/// A blender whose third blend panics (or, with `fail_with_error`, returns an error).
+#[derive(Default)]
+struct BrokenBlender {
+    calls: AtomicUsize,
+    fail_with_error: bool,
+}
+
+impl Blender for BrokenBlender {
+    fn needs_errors(&self) -> bool {
+        false
+    }
+
+    fn blend(&self, a: PassFrame<'_>, _: PassFrame<'_>, _: f32) -> Result<Image, VideoError> {
+        let n = self.calls.fetch_add(1, Ordering::Relaxed) + 1;
+        match (n, self.fail_with_error) {
+            (3, false) => panic!("blend exploded"),
+            (3, true) => Err(VideoError::InvalidInput("blend refused".into())),
+            _ => Ok(a.image.clone()),
+        }
+    }
+}
+
+#[test]
+fn a_failing_blender_fails_the_render_instead_of_hanging() {
+    for fail_with_error in [false, true] {
+        let result = returns_in_time(move || {
+            let (frames, keyframes) = long_shot();
+            let shot = Shot { frames: &frames, keyframes, mask: None, range: None };
+            let blender = BrokenBlender { fail_with_error, ..BrokenBlender::default() };
+            Renderer::with_engines(&SolidColour::default(), &ComputeDevice::cpu(), fast_params())
+                .blender(&blender)
+                .render(&shot, &MemorySink::new())
+        });
+        match (result, fail_with_error) {
+            (Err(VideoError::Panicked(msg)), false) => assert!(msg.contains("blend exploded"), "{msg}"),
+            (Err(VideoError::InvalidInput(msg)), true) => assert!(msg.contains("blend refused"), "{msg}"),
+            (other, _) => panic!("expected the blender's failure, got {other:?}"),
+        }
+    }
+}
+
 #[test]
 fn a_panicking_progress_callback_or_engine_fails_the_render() {
     let result = returns_in_time(|| {
@@ -440,4 +610,95 @@ fn a_panicking_progress_callback_or_engine_fails_the_render() {
             .render(&shot, &MemorySink::new())
     });
     assert!(matches!(&result, Err(VideoError::Panicked(m)) if m.contains("engine failure")), "{result:?}");
+}
+
+/// Deterministic CPU synthesis (per-band occupancy maps, fixed band count).
+fn deterministic() -> Params {
+    Params { omega_sync: OmegaSync::PerTile, num_bands: Some(4), ..Params::default() }
+}
+
+#[test]
+fn warm_start_follows_the_scene_like_a_cold_start() {
+    let (w, h) = (96, 64);
+    let (frames, truth) = scene(w, h, 9);
+    let keyframes =
+        vec![Keyframe { frame: 0, style: truth[0].clone() }, Keyframe { frame: 8, style: truth[8].clone() }];
+    let shot = Shot { frames: &frames, keyframes, mask: None, range: None };
+    let device = ComputeDevice::cpu();
+    let render = |warm_start| {
+        let sink = MemorySink::new();
+        let params = VideoParams { warm_start, synthesis: deterministic(), ..fast_params() };
+        Renderer::new(&device, params).render(&shot, &sink).unwrap();
+        sink.into_frames()
+    };
+    let cold = render(None);
+    let warm = render(Some(WarmStartSettings::default()));
+    // Keyframes run cold either way.
+    assert_eq!(warm[&0], cold[&0]);
+    assert_eq!(warm[&8], cold[&8]);
+    for t in 1..8 {
+        let (ew, ec) = (mean_abs_diff(&warm[&t], &truth[t]), mean_abs_diff(&cold[&t], &truth[t]));
+        assert!(ew < 1.25 * ec + 1.0, "frame {t}: warm {ew:.2} vs cold {ec:.2}");
+        assert_ne!(warm[&t], cold[&t], "frame {t} did not change");
+    }
+}
+
+#[test]
+fn sixteen_bit_keyframes_give_16_bit_frames() {
+    let (w, h) = (80, 56);
+    let (frames, truth) = scene(w, h, 7);
+    // 16-bit paintings with detail below one 8-bit level; the 8-bit keyframes are them rounded.
+    let paint16 = |img: &Image, seed: u16| {
+        let data = img
+            .data()
+            .iter()
+            .enumerate()
+            .map(|(i, &v)| if i % 4 == 3 { 65535 } else { (u16::from(v) * 257).saturating_add((i as u16 ^ seed) % 97) })
+            .collect();
+        Image16::from_raw(w, h, 4, data)
+    };
+    let k16 = vec![
+        Keyframe16 { frame: 0, style: paint16(&truth[0], 3) },
+        Keyframe16 { frame: 6, style: paint16(&truth[6], 7) },
+    ];
+    let keyframes: Vec<Keyframe> = k16.iter().map(|k| Keyframe { frame: k.frame, style: k.style.to_image() }).collect();
+    let shot = Shot { frames: &frames, keyframes, mask: None, range: None };
+    let device = ComputeDevice::cpu();
+    for blend in [BlendMode::Linear, BlendMode::Adaptive] {
+        let params = VideoParams { blend, synthesis: deterministic(), ..fast_params() };
+        let sink = MemorySink::new();
+        Renderer::new(&device, params.clone()).keyframes16(&k16).render(&shot, &sink).unwrap();
+        let out16 = sink.into_frames16();
+        assert_eq!(out16.len(), 7, "{blend:?}");
+        let eight = MemorySink::new();
+        Renderer::new(&device, params).render(&shot, &eight).unwrap();
+        let eight = eight.into_frames();
+        for (t, img) in &out16 {
+            assert_eq!(img.channels(), 3);
+            assert!(img.data().iter().any(|v| v % 257 != 0), "{blend:?}, frame {t}: no extra precision");
+            // The same render at more precision.
+            let d = mean_abs_diff(&img.to_image(), &eight[t]);
+            assert!(d < 0.6, "{blend:?}, frame {t}: {d:.3} from the 8-bit render");
+        }
+    }
+    // The painting at keyframes, at 16 bits.
+    let params = VideoParams { keyframe_output: KeyframeOutput::Painting, ..fast_params() };
+    let sink = MemorySink::new();
+    Renderer::new(&device, params).keyframes16(&k16).render(&shot, &sink).unwrap();
+    let out16 = sink.into_frames16();
+    let rgb: Vec<u16> = k16[1].style.data().as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect();
+    assert_eq!(out16[&6].data(), &rgb[..]);
+    // Every keyframe needs its 16-bit painting.
+    let err = Renderer::new(&device, fast_params()).keyframes16(&k16[..1]).render(&shot, &MemorySink::new());
+    assert!(matches!(err, Err(VideoError::InvalidInput(_))), "{err:?}");
+    // An engine without 16-bit support still gives 16-bit frames: its results widened (the
+    // blended frames in between then carry the blend's fractions).
+    let sink = MemorySink::new();
+    Renderer::with_engines(&SolidColour::default(), &device, fast_params())
+        .keyframes16(&k16)
+        .render(&shot, &sink)
+        .unwrap();
+    let out16 = sink.into_frames16();
+    assert_eq!(out16.len(), 7);
+    assert!([0, 6].iter().all(|t| out16[t].data().iter().all(|v| v % 257 == 0)));
 }
