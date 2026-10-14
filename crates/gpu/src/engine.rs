@@ -44,11 +44,22 @@ struct Layout {
     /// u32 words per guide (and modulation) pixel.
     guide_w: usize,
     modulated: bool,
+    /// When `modulated`: the inclusive range of guide WORDS whose channels carry a non-trivial
+    /// modulation. Words outside it are 255 everywhere (a no-op), so the patch kernel skips their
+    /// modulation fetch and scale. The whole guide (`0..guide_w`) when the range is unknown.
+    mod_lo: u32,
+    mod_hi: u32,
 }
 
 impl Layout {
     fn params_size(self) -> usize {
         PARAMS_HEADER + 16 * (self.style_w + self.guide_w)
+    }
+
+    /// Guide words whose modulation the patch kernel reads (the gated channels' words); 0 when not
+    /// modulated. The tile and the per-sample cost only carry these.
+    fn mod_words(self) -> usize {
+        if self.modulated { (self.mod_hi - self.mod_lo + 1) as usize } else { 0 }
     }
 }
 
@@ -297,7 +308,7 @@ fn tile_len(layout: Layout, patch_size: usize, shape: TileShape) -> usize {
         TileShape::Square => WG as usize,
         TileShape::Checkerboard => 2 * WG as usize,
     } + apron;
-    width * (WG as usize + apron) * (layout.style_w + layout.guide_w * (1 + layout.modulated as usize))
+    width * (WG as usize + apron) * (layout.style_w + layout.guide_w + layout.mod_words())
 }
 
 /// Substitutes the template constants of `synth.wgsl`. The target tile is used when it fits
@@ -310,6 +321,8 @@ fn synth_source(layout: Layout, patch_size: usize, shape: TileShape, workgroup_s
         .replace("{{GUIDE_W}}", &layout.guide_w.to_string())
         .replace("{{R}}", &(patch_size / 2).to_string())
         .replace("{{MODULATED}}", if layout.modulated { "true" } else { "false" })
+        .replace("{{MOD_LO}}", &layout.mod_lo.to_string())
+        .replace("{{MOD_WORDS}}", &layout.mod_words().to_string())
         .replace("{{WG}}", &WG.to_string())
         .replace("{{USE_TILE}}", if use_tile { "true" } else { "false" })
         .replace("{{TILE_LEN}}", &(if use_tile { tile } else { 1 }).to_string())
@@ -416,7 +429,9 @@ struct Cost {
 
 impl Cost {
     fn new(layout: Layout) -> Self {
-        let words = (layout.style_w + layout.guide_w * (1 + layout.modulated as usize)) as u64;
+        // Each patch pixel reads the style and guide words, plus one modulation word for every
+        // guide word in the modulated range.
+        let words = (layout.style_w + layout.guide_w + layout.mod_words()) as u64;
         Self { words, style_words: layout.style_w as u64 }
     }
 
@@ -579,8 +594,15 @@ fn run(
 
     let ns = input.source_style.channels();
     let ng = input.source_guide.channels();
-    let layout =
-        Layout { style_w: ns.div_ceil(4), guide_w: ng.div_ceil(4), modulated: input.target_modulation.is_some() };
+    let guide_w = ng.div_ceil(4);
+    let modulated = input.target_modulation.is_some();
+    // The guide words that carry modulation: from the gated layers' channel range, or the whole
+    // guide when the range is unknown (a directly-built modulation). Ignored when not modulated.
+    let (mod_lo, mod_hi) = match input.modulated_range.filter(|_| modulated) {
+        Some((lo, hi)) => (lo / 4, hi / 4),
+        None => (0, guide_w.saturating_sub(1) as u32),
+    };
+    let layout = Layout { style_w: ns.div_ceil(4), guide_w, modulated, mod_lo, mod_hi };
     let source_size = input.source_style.size();
     let target_size = input.target_guide.size();
     let num_levels = sched.num_levels;
@@ -973,8 +995,9 @@ mod tests {
             target_modulation: None,
             style_weights: vec![1.0; 3],
             guide_weights: vec![0.5; 6],
+            modulated_range: None,
         };
-        let layout = Layout { style_w: 1, guide_w: 2, modulated: false };
+        let layout = Layout { style_w: 1, guide_w: 2, modulated: false, mod_lo: 0, mod_hi: 0 };
         let params = Params::default();
         let sched = params.schedule_for_levels(2, Engine::Gpu).unwrap();
         let ph = &phases(&params, 2, (40, 30), (40, 30))[1];
@@ -1005,7 +1028,7 @@ mod tests {
 
     #[test]
     fn shader_template_is_fully_substituted() {
-        let layout = Layout { style_w: 2, guide_w: 6, modulated: true };
+        let layout = Layout { style_w: 2, guide_w: 6, modulated: true, mod_lo: 0, mod_hi: 5 };
         let src = synth_source(layout, 7, TileShape::Square, 1 << 20);
         assert!(src.contains("const USE_TILE: bool = true;"));
         assert!(src.contains(&format!("const TILE_LEN: u32 = {}u;", tile_len(layout, 7, TileShape::Square))));
@@ -1017,12 +1040,12 @@ mod tests {
     #[test]
     fn checkerboard_tile_does_not_change_the_square_one() {
         // 2 style + 6 guide words + 6 modulation words per pixel, 7 x 7 patches.
-        let layout = Layout { style_w: 2, guide_w: 6, modulated: true };
+        let layout = Layout { style_w: 2, guide_w: 6, modulated: true, mod_lo: 0, mod_hi: 5 };
         assert_eq!(tile_len(layout, 7, TileShape::Square), 14 * 14 * 14);
         assert_eq!(tile_len(layout, 7, TileShape::Checkerboard), 22 * 14 * 14);
         // A layout whose square tile fits 16 KiB but whose checkerboard tile does not: only the
         // checkerboard module falls back to global reads.
-        let layout = Layout { style_w: 3, guide_w: 12, modulated: false };
+        let layout = Layout { style_w: 3, guide_w: 12, modulated: false, mod_lo: 0, mod_hi: 0 };
         let fits = |shape| synth_source(layout, 7, shape, 16384).contains("const USE_TILE: bool = true;");
         assert!(fits(TileShape::Square) && !fits(TileShape::Checkerboard));
     }

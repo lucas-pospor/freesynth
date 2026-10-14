@@ -176,6 +176,11 @@ pub struct SynthesisInput {
     pub style_weights: Vec<f32>,
     /// One weight per guide channel.
     pub guide_weights: Vec<f32>,
+    /// The inclusive range of guide channels that carry a non-trivial modulation (the gated
+    /// layers), as `(first, last)`. The channels outside it are 255 everywhere in
+    /// [`target_modulation`], so modulating them is a no-op; backends may skip it. `None` means the
+    /// range is unknown, so the whole guide is treated as modulated. [`from_rgba_layers`] fills it.
+    pub modulated_range: Option<(u32, u32)>,
 }
 
 /// A pair of guide images (RGBA) with an optional weight, as given by `-guide` / `-weight`.
@@ -271,6 +276,16 @@ impl SynthesisInput {
             }
             Image::from_raw(w, h, ng, data)
         });
+        // The channel span of the gated layers, so a backend modulates only those channels.
+        let mut modulated_range: Option<(u32, u32)> = None;
+        let mut offset = 0u32;
+        for (g, &n) in guides.iter().zip(&counts) {
+            if g.modulation.is_some() {
+                let (lo, hi) = (offset, offset + n as u32 - 1);
+                modulated_range = Some(modulated_range.map_or((lo, hi), |(a, b)| (a.min(lo), b.max(hi))));
+            }
+            offset += n as u32;
+        }
 
         let sw = style_weight.unwrap_or(1.0);
         let style_weights = vec![sw / ns as f32; ns];
@@ -286,6 +301,7 @@ impl SynthesisInput {
             target_modulation,
             style_weights,
             guide_weights,
+            modulated_range,
         })
     }
 
@@ -609,6 +625,7 @@ mod tests {
             target_modulation: None,
             style_weights: vec![1.0 / 3.0; 3],
             guide_weights: vec![1.0 / 3.0; 3],
+            modulated_range: None,
         }
     }
 
@@ -716,6 +733,7 @@ mod tests {
         let plain =
             SynthesisInput::from_rgba_layers(&style, None, &[GuideLayer::new(colour.clone(), colour.clone())]).unwrap();
         assert!(plain.target_modulation.is_none());
+        assert_eq!(plain.modulated_range, None);
         let input = SynthesisInput::from_rgba_layers(
             &style,
             None,
@@ -727,6 +745,8 @@ mod tests {
         .unwrap();
         let m = input.target_modulation.as_ref().unwrap();
         assert_eq!((m.size(), m.channels()), ((3, 1), 4));
+        // Only the second layer (the gray guide, channel 3) is gated.
+        assert_eq!(input.modulated_range, Some((3, 3)));
         assert_eq!(m.pixel(0, 0), &[255, 255, 255, 0]);
         assert_eq!(m.pixel(1, 0), &[255, 255, 255, 100]);
         assert_eq!(m.pixel(2, 0), &[255, 255, 255, 255]);
@@ -776,6 +796,7 @@ mod tests {
             target_modulation: None,
             style_weights: vec![1.0; 3],
             guide_weights: vec![1.0; 3],
+            modulated_range: None,
         };
         let out = synthesize(&input, &Params { patch_size: 3, ..Params::default() }).unwrap();
         assert_eq!(out.image.size(), (30, 60));

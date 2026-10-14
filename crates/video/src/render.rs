@@ -976,6 +976,7 @@ mod tests {
             target_modulation: None,
             style_weights: vec![1.0 / 3.0; 3],
             guide_weights: vec![2.0, 2.0, 2.0, 0.5],
+            modulated_range: None,
         };
         let raw: Vec<f32> = (0..w * h).map(|i| 100.0 + i as f32).collect();
         let nominal: Vec<f32> = raw.iter().map(|e| (e / (25.0 * 7.5)).sqrt()).collect();

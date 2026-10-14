@@ -262,6 +262,7 @@ mod tests {
             target_modulation: None,
             style_weights: vec![1.0; 3],
             guide_weights: vec![1.0],
+            modulated_range: None,
         }
     }
 

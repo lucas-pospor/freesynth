@@ -326,6 +326,7 @@ mod tests {
             target_modulation: None,
             style_weights: vec![1.0 / 3.0; 3],
             guide_weights: vec![1.0 / 3.0; 3],
+            modulated_range: None,
         }
     }
 
@@ -433,12 +434,44 @@ mod tests {
                 target_modulation: None,
                 style_weights: vec![1.0 / style.channels() as f32; style.channels()],
                 guide_weights: vec![1.0 / guide.channels() as f32; guide.channels()],
+                modulated_range: None,
             };
             let out = ctx.synthesize(&input, &Params { patch_size: 3, ..Params::default() }).unwrap();
             assert_eq!(out.image.channels(), style.channels());
             let p = psnr(&out.image, style);
             assert!(p > 35.0, "{} style + {} guide channels: PSNR {p:.2} dB", style.channels(), guide.channels());
         }
+    }
+
+    #[test]
+    fn modulation_subrange_matches_full() {
+        // A 5-channel guide so the one gated channel (4) sits in guide word 1; the selective kernel
+        // skips word 0 (its modulation is 255, a no-op). The result must match full modulation.
+        let Some(ctx) = context() else { return };
+        let img = test_image(64, 64, 0.0);
+        let guide =
+            Image::from_raw(64, 64, 5, img.data().chunks(3).flat_map(|p| [p[0], p[1], p[2], p[0], p[1]]).collect());
+        let modimg = Image::from_raw(
+            64,
+            64,
+            5,
+            (0..64 * 64).flat_map(|i| [255, 255, 255, 255, ((i % 64) * 4).min(255) as u8]).collect(),
+        );
+        let make = |range| SynthesisInput {
+            source_style: img.clone(),
+            source_guide: guide.clone(),
+            target_guide: guide.clone(),
+            target_modulation: Some(modimg.clone()),
+            style_weights: vec![1.0 / 3.0; 3],
+            guide_weights: vec![1.0 / 5.0; 5],
+            modulated_range: range,
+        };
+        let params = Params { patch_size: 3, ..Params::default() };
+        let selective = ctx.synthesize(&make(Some((4, 4))), &params).unwrap(); // skips word 0
+        let full = ctx.synthesize(&make(None), &params).unwrap(); // modulates every word
+        assert!(psnr(&selective.image, &img) > 35.0);
+        let p = psnr(&selective.image, &full.image);
+        assert!(p > 40.0, "selective vs full modulation: {p:.1} dB");
     }
 
     /// A small non-trivial synthesis (target differs from the source) must stay close to the CPU
@@ -455,6 +488,7 @@ mod tests {
             target_modulation: None,
             style_weights: vec![1.0 / 3.0; 3],
             guide_weights: vec![1.0 / 3.0; 3],
+            modulated_range: None,
         };
         for vote_mode in [VoteMode::Plain, VoteMode::Weighted] {
             let params = Params { vote_mode: Some(vote_mode), ..Params::default() };
@@ -482,6 +516,7 @@ mod tests {
             target_modulation: None,
             style_weights: vec![1.0; 3],
             guide_weights: vec![1.0; 3],
+            modulated_range: None,
         };
         for patch_size in [3, 5, 7] {
             let params = Params { patch_size, extra_pass_3x3: patch_size == 7, ..Params::default() };
@@ -504,6 +539,7 @@ mod tests {
             target_modulation: None,
             style_weights: vec![1.0 / 3.0; 3],
             guide_weights: vec![1.0 / 3.0; 3],
+            modulated_range: None,
         }
     }
 

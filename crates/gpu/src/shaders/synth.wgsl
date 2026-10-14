@@ -16,6 +16,10 @@ const GUIDE_W: u32 = {{GUIDE_W}}u;   // words per guide pixel
 const SRC_W: u32 = STYLE_W + GUIDE_W; // words per packed source pixel
 const R: i32 = {{R}};                // patch radius (patch size = 2R + 1)
 const MODULATED: bool = {{MODULATED}};
+// The guide words whose modulation is non-trivial (the gated channels): the kernel modulates words
+// MOD_LO .. MOD_LO + MOD_WORDS and only those modulation words are staged into the tile.
+const MOD_LO: u32 = {{MOD_LO}}u;
+const MOD_WORDS: u32 = {{MOD_WORDS}}u;
 const WG: u32 = {{WG}}u;
 // Cache the target patch neighbourhood of each workgroup in workgroup memory.
 const USE_TILE: bool = {{USE_TILE}};
@@ -27,7 +31,7 @@ const PATCH: i32 = 2 * R + 1;
 // of their own whose TILE_LEN (and USE_TILE) is sized for that tile, the other kernels' from one
 // sized for TILE x TILE.
 const TILE: i32 = i32(WG) + 2 * R;
-const TILE_WORDS: u32 = STYLE_W + GUIDE_W + select(0u, GUIDE_W, MODULATED);
+const TILE_WORDS: u32 = STYLE_W + GUIDE_W + MOD_WORDS;
 const TILE_LEN: u32 = {{TILE_LEN}}u;
 const FLT_MAX: f32 = 3.40282347e+38;
 
@@ -124,7 +128,8 @@ fn load_tile_rect(origin: vec2<i32>, size: vec2<i32>, lid: vec3<u32>) {
         } else if (w < STYLE_W + GUIDE_W) {
             v = tgt_guide[gi * GUIDE_W + w - STYLE_W];
         } else {
-            v = tgt_mod[gi * GUIDE_W + w - STYLE_W - GUIDE_W];
+            // Only the modulated words are staged, starting at guide word MOD_LO.
+            v = tgt_mod[gi * GUIDE_W + MOD_LO + (w - STYLE_W - GUIDE_W)];
         }
         tile[k] = v;
     }
@@ -150,8 +155,8 @@ fn pixel_error_tile(ti: u32, si: u32) -> f32 {
     for (var k = 0u; k < GUIDE_W; k++) {
         let d = bytes(tile[o + STYLE_W + k]) - bytes(src[si * SRC_W + STYLE_W + k]);
         var w = P.guide_w[k];
-        if (MODULATED) {
-            w *= bytes(tile[o + STYLE_W + GUIDE_W + k]) / 255.0;
+        if (MODULATED && k >= MOD_LO && k < MOD_LO + MOD_WORDS) {
+            w *= bytes(tile[o + STYLE_W + GUIDE_W + (k - MOD_LO)]) / 255.0;
         }
         e += dot(w, d * d);
     }
@@ -168,7 +173,7 @@ fn pixel_error(ti: u32, si: u32) -> f32 {
     for (var k = 0u; k < GUIDE_W; k++) {
         let d = bytes(tgt_guide[ti * GUIDE_W + k]) - bytes(src[si * SRC_W + STYLE_W + k]);
         var w = P.guide_w[k];
-        if (MODULATED) {
+        if (MODULATED && k >= MOD_LO && k < MOD_LO + MOD_WORDS) {
             w *= bytes(tgt_mod[ti * GUIDE_W + k]) / 255.0;
         }
         e += dot(w, d * d);
