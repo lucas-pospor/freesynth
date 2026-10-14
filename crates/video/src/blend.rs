@@ -55,6 +55,13 @@ pub enum BlendMode {
     /// renderer requests for the passes it blends. The default.
     #[default]
     Adaptive,
+    /// Like [`Adaptive`](BlendMode::Adaptive), but only the fine detail is error-selected: each
+    /// pass is split into a base (shading and shadows, Gaussian [`BlendSettings::shading_scale`])
+    /// and a detail residual (the strokes). The base is crossfaded, so soft shadows stay soft
+    /// instead of taking one pass's hard edge ("looking like an object"), while the detail is
+    /// selected per pixel like the adaptive blend. No gradient-domain solve, so it is also cheaper.
+    /// Also needs the engine's per-pixel errors.
+    Layered,
 }
 
 impl BlendMode {
@@ -63,6 +70,7 @@ impl BlendMode {
         match self {
             BlendMode::Linear => "linear",
             BlendMode::Adaptive => "adaptive",
+            BlendMode::Layered => "layered",
         }
     }
 }
@@ -74,7 +82,8 @@ impl std::str::FromStr for BlendMode {
         match s {
             "linear" | "crossfade" => Ok(BlendMode::Linear),
             "adaptive" => Ok(BlendMode::Adaptive),
-            _ => invalid(format!("unknown blend mode '{s}' (expected linear or adaptive)")),
+            "layered" => Ok(BlendMode::Layered),
+            _ => invalid(format!("unknown blend mode '{s}' (expected linear, adaptive or layered)")),
         }
     }
 }
@@ -102,18 +111,39 @@ pub struct BlendSettings {
     /// How much of the detail energy lost by mixing two uncorrelated stroke textures is
     /// restored, from 0 (plain weighted mix of the gradients) to 1 (full energy).
     pub detail: f32,
+    /// [`Layered`](BlendMode::Layered) only: the scale that separates shading from detail, as a
+    /// fraction of the larger frame side. Each pass is split into a base (Gaussian of this scale,
+    /// carrying the shading and the shadows) and a detail residual; the base is crossfaded and only
+    /// the detail is error-selected, so a soft shadow never gains a selected hard edge. About 0.006
+    /// (6 to 12 px at SD/HD) softens the shading while keeping the strokes; larger moves more into
+    /// the selected detail (sharper, closer to [`Adaptive`](BlendMode::Adaptive)), 0 is the crossfade.
+    pub shading_scale: f32,
 }
 
 impl Default for BlendSettings {
     fn default() -> Self {
-        Self { softness: 0.33, error_smoothing: 0.125, temporal_prior: 1.0, data_weight: 0.05, detail: 0.0 }
+        Self {
+            softness: 0.33,
+            error_smoothing: 0.125,
+            temporal_prior: 1.0,
+            data_weight: 0.05,
+            detail: 0.0,
+            shading_scale: 0.006,
+        }
     }
 }
 
 impl BlendSettings {
     /// Checks the settings.
     pub fn validate(&self) -> Result<(), VideoError> {
-        let finite = [self.softness, self.error_smoothing, self.temporal_prior, self.data_weight, self.detail];
+        let finite = [
+            self.softness,
+            self.error_smoothing,
+            self.temporal_prior,
+            self.data_weight,
+            self.detail,
+            self.shading_scale,
+        ];
         if finite.iter().any(|v| !v.is_finite()) {
             return invalid("blend settings must be finite");
         }
@@ -122,6 +152,9 @@ impl BlendSettings {
         }
         if self.error_smoothing < 0.0 || self.temporal_prior < 0.0 || !(0.0..=1.0).contains(&self.detail) {
             return invalid("blend error smoothing and temporal prior must be non-negative, detail in 0..=1");
+        }
+        if self.shading_scale < 0.0 {
+            return invalid("blend shading scale must be non-negative");
         }
         Ok(())
     }
@@ -194,13 +227,14 @@ pub struct BuiltinBlender {
 
 impl Blender for BuiltinBlender {
     fn needs_errors(&self) -> bool {
-        self.mode == BlendMode::Adaptive
+        matches!(self.mode, BlendMode::Adaptive | BlendMode::Layered)
     }
 
     fn working_bytes(&self, width: usize, height: usize) -> usize {
         match self.mode {
             BlendMode::Linear => 0,
             BlendMode::Adaptive => adaptive_working_bytes(width * height),
+            BlendMode::Layered => layered_working_bytes(width * height),
         }
     }
 
@@ -349,6 +383,7 @@ fn blend_with<F: Frame>(
     match mode {
         BlendMode::Linear => linear(a.image, b.image, alpha),
         BlendMode::Adaptive => adaptive(settings, a, b, alpha),
+        BlendMode::Layered => layered(settings, a, b, alpha),
     }
 }
 
@@ -465,6 +500,83 @@ fn adaptive<F: Frame>(settings: &BlendSettings, a: PassFrame<'_, F>, b: PassFram
         for (c, o) in px.iter_mut().enumerate() {
             let v = solved[c][i];
             let v = match (matte.as_ref().map(|m| &m.out), Some(c) != alpha_ch) {
+                // Back from premultiplied, clamped to the blended alpha.
+                (Some(al), true) if al[i] > 0.0 => v.clamp(0.0, al[i]) * 255.0 / al[i],
+                (Some(_), true) => 0.0,
+                _ => v,
+            };
+            *o = F::S::from_f32(v * F::S::SCALE);
+        }
+    });
+    F::from_samples(w, h, nc, out)
+}
+
+/// Peak working memory of the layered blend per pixel. It keeps a few f32 buffers per channel
+/// (the premultiplied passes, their bases and the mixed detail) but no multigrid hierarchy, so it
+/// is lighter than the adaptive blend. Same concurrency split as [`adaptive`]; measured generously.
+fn layered_working_bytes(pixels: usize) -> usize {
+    pixels * if pixels <= CONCURRENT_SOLVE_PIXELS { 200 } else { 56 }
+}
+
+/// The [layered](BlendMode::Layered) blend: split each pass into a base (shading, Gaussian of
+/// `shading_scale`) and a detail residual, crossfade the base and error-select the detail. Mirrors
+/// [`adaptive`]'s channel and alpha handling but combines in image space (no gradient-domain solve).
+fn layered<F: Frame>(settings: &BlendSettings, a: PassFrame<'_, F>, b: PassFrame<'_, F>, alpha: f32) -> F {
+    if alpha <= 0.0 {
+        return a.image.clone();
+    }
+    if alpha >= 1.0 {
+        return b.image.clone();
+    }
+    let (w, h) = a.image.size();
+    let nc = a.image.channels();
+    let n = w * h;
+    let wa = selection_weights(settings, a, b, alpha);
+    let alpha_ch = alpha_channel(nc);
+    let sigma = settings.shading_scale * w.max(h) as f32;
+    let channel = |img: &F, c: usize| -> Vec<f32> {
+        img.samples().par_chunks(nc).map(|px| px[c].to_f32() / F::S::SCALE).collect()
+    };
+    // The output alpha follows the selection weights (as the adaptive matte does).
+    let (aa, ab, out_alpha) = match alpha_ch {
+        Some(c) => {
+            let (aa, ab) = (channel(a.image, c), channel(b.image, c));
+            let out: Vec<f32> = aa.par_iter().zip(&ab).zip(&wa).map(|((x, y), w)| w * x + (1.0 - w) * y).collect();
+            (Some(aa), Some(ab), Some(out))
+        }
+        None => (None, None, None),
+    };
+    let solve = |c: usize| -> Vec<f32> {
+        if Some(c) == alpha_ch {
+            return out_alpha.clone().unwrap();
+        }
+        // Premultiplied colour, so transparent pixels do not bleed into the blurred base.
+        let premul = |v: Vec<f32>, al: &Option<Vec<f32>>| -> Vec<f32> {
+            match al {
+                Some(al) => v.iter().zip(al).map(|(v, a)| v * a / 255.0).collect(),
+                None => v,
+            }
+        };
+        let pa = premul(channel(a.image, c), &aa);
+        let pb = premul(channel(b.image, c), &ab);
+        let base_a = if sigma > 0.0 { gaussian_blur(&pa, (w, h), sigma) } else { pa.clone() };
+        let base_b = if sigma > 0.0 { gaussian_blur(&pb, (w, h), sigma) } else { pb.clone() };
+        let res_a: Vec<f32> = pa.par_iter().zip(&base_a).map(|(v, bse)| v - bse).collect();
+        let res_b: Vec<f32> = pb.par_iter().zip(&base_b).map(|(v, bse)| v - bse).collect();
+        // Base crossfaded (scalar alpha), detail error-selected (variance-preserving if `detail`).
+        let det = mix_gradients(&res_a, &res_b, &wa, (w, h), settings.detail);
+        (0..n).into_par_iter().map(|i| (1.0 - alpha) * base_a[i] + alpha * base_b[i] + det[i]).collect()
+    };
+    let solved: Vec<Vec<f32>> = if n <= CONCURRENT_SOLVE_PIXELS {
+        (0..nc).into_par_iter().map(solve).collect()
+    } else {
+        (0..nc).map(solve).collect()
+    };
+    let mut out = vec![F::S::from_f32(0.0); a.image.samples().len()];
+    out.par_chunks_mut(nc).enumerate().for_each(|(i, px)| {
+        for (c, o) in px.iter_mut().enumerate() {
+            let v = solved[c][i];
+            let v = match (&out_alpha, Some(c) != alpha_ch) {
                 // Back from premultiplied, clamped to the blended alpha.
                 (Some(al), true) if al[i] > 0.0 => v.clamp(0.0, al[i]) * 255.0 / al[i],
                 (Some(_), true) => 0.0,
@@ -780,6 +892,102 @@ mod tests {
                 }
                 // The selection, not the crossfade, decides the alpha on the right.
                 assert!(out.pixel(3 * w / 4, h / 2)[3] > 128, "alpha {alpha}: {:?}", out.pixel(3 * w / 4, h / 2));
+            }
+        }
+    }
+
+    #[test]
+    fn layered_returns_each_pass_at_its_keyframe() {
+        let a = textured(40, 30, 3, 1);
+        let b = textured(40, 30, 3, 2);
+        let errors = vec![1.0f32; 40 * 30];
+        let blender = BuiltinBlender { mode: BlendMode::Layered, settings: BlendSettings::default() };
+        let pa = PassFrame { image: &a, errors: Some(&errors) };
+        let pb = PassFrame { image: &b, errors: Some(&errors) };
+        assert_eq!(blender.blend(pa, pb, 0.0).unwrap(), a);
+        assert_eq!(blender.blend(pa, pb, 1.0).unwrap(), b);
+    }
+
+    #[test]
+    fn layered_crossfades_shading_even_when_errors_select_one_pass() {
+        // Shared fine texture, plus a low-frequency shading step: A brighter on the left, B on the
+        // right. Errors strongly favour A everywhere.
+        let (w, h) = (80, 60);
+        let base = textured(w, h, 3, 21);
+        let (mut a, mut b) = (base.clone(), base.clone());
+        for y in 0..h {
+            for x in 0..w {
+                for c in 0..3 {
+                    let bump = |p: &mut u8| *p = (i32::from(*p) + 40).clamp(0, 255) as u8;
+                    if x < w / 2 {
+                        bump(&mut a.pixel_mut(x, y)[c]);
+                    } else {
+                        bump(&mut b.pixel_mut(x, y)[c]);
+                    }
+                }
+            }
+        }
+        let ea = vec![1.0f32; w * h];
+        let eb = vec![20.0f32; w * h];
+        let settings = BlendSettings { shading_scale: 0.05, error_smoothing: 0.0, ..BlendSettings::default() };
+        let blender = BuiltinBlender { mode: BlendMode::Layered, settings };
+        let out = blender
+            .blend(PassFrame { image: &a, errors: Some(&ea) }, PassFrame { image: &b, errors: Some(&eb) }, 0.5)
+            .unwrap();
+        let lin = blend(BlendMode::Linear, &a, &b, 0.5);
+        // The shading (low-pass of the red channel) follows the crossfade, not the error-selected
+        // pass A.
+        let low = |img: &Image| -> Vec<f32> {
+            let red: Vec<f32> = img.data().iter().step_by(3).map(|&v| f32::from(v)).collect();
+            gaussian_blur(&red, (w, h), 0.05 * w as f32)
+        };
+        let (lo, ll, la) = (low(&out), low(&lin), low(&a));
+        let dist = |x: &[f32], y: &[f32]| x.iter().zip(y).map(|(a, b)| (a - b).abs()).sum::<f32>() / x.len() as f32;
+        assert!(dist(&lo, &ll) < 0.3 * dist(&lo, &la), "{} vs {}", dist(&lo, &ll), dist(&lo, &la));
+    }
+
+    #[test]
+    fn layered_keeps_detail() {
+        // Different textures, A better on the left, B on the right: the detail is selected and kept,
+        // unlike the crossfade which halves it.
+        let (w, h) = (64, 32);
+        let a = textured(w, h, 3, 22);
+        let b = textured(w, h, 3, 23);
+        let ea: Vec<f32> = (0..w * h).map(|i| if i % w < w / 2 { 1.0 } else { 20.0 }).collect();
+        let eb: Vec<f32> = (0..w * h).map(|i| if i % w < w / 2 { 20.0 } else { 1.0 }).collect();
+        let settings = BlendSettings { shading_scale: 0.03, error_smoothing: 0.0, ..BlendSettings::default() };
+        let blender = BuiltinBlender { mode: BlendMode::Layered, settings };
+        let out = blender
+            .blend(PassFrame { image: &a, errors: Some(&ea) }, PassFrame { image: &b, errors: Some(&eb) }, 0.5)
+            .unwrap();
+        let lin = blend(BlendMode::Linear, &a, &b, 0.5);
+        assert!(hf_energy(&out) > 1.4 * hf_energy(&lin), "{} vs {}", hf_energy(&out), hf_energy(&lin));
+    }
+
+    #[test]
+    fn layered_keeps_alpha_clean() {
+        let (w, h) = (32, 24);
+        let mut a = textured(w, h, 4, 7);
+        let mut b = textured(w, h, 4, 8);
+        for img in [&mut a, &mut b] {
+            for y in 0..h {
+                for x in 0..w {
+                    img.pixel_mut(x, y)[3] = if x < w / 3 { 0 } else { 255 };
+                }
+            }
+        }
+        let errors = vec![1.0f32; w * h];
+        let out = BuiltinBlender { mode: BlendMode::Layered, settings: BlendSettings::default() }
+            .blend(PassFrame { image: &a, errors: Some(&errors) }, PassFrame { image: &b, errors: Some(&errors) }, 0.4)
+            .unwrap();
+        assert_eq!(out.channels(), 4);
+        for y in 0..h {
+            for x in 0..w {
+                let p = out.pixel(x, y);
+                assert_eq!(p[3], if x < w / 3 { 0 } else { 255 }, "alpha at ({x}, {y})");
+                if x < w / 3 {
+                    assert_eq!(&p[..3], &[0, 0, 0]);
+                }
             }
         }
     }

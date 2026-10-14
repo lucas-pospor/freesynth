@@ -47,15 +47,16 @@
 //! bit_depth = 8                # 8 or 16 (16 needs PNG frames)
 //! codec = "auto"               # auto (by extension), prores, prores4444, h264, h265, ffv1, png, vp9
 //! # quality = 16               # CRF of h264, h265 and vp9
-//! blend = "adaptive"           # or "linear" (crossfade)
+//! blend = "adaptive"           # or "linear" (crossfade), or "layered" (soft shading + detail)
 //! keyframes = "synthesized"    # or "painting"
 //!
-//! [blending]                   # tuning of the adaptive blend
+//! [blending]                   # tuning of the adaptive and layered blends
 //! softness = 0.33              # larger: steadier, smaller: sharper selection
 //! error_smoothing = 0.125
 //! temporal_prior = 1.0
 //! data_weight = 0.05
 //! detail = 0.0
+//! shading_scale = 0.006        # "layered" only: shading/detail split (fraction of the frame)
 //! ```
 //!
 //! Every field has a default, so a project needs only `media.frames`, the keyframes and
@@ -397,6 +398,10 @@ pub struct Blending {
     pub data_weight: f32,
     /// How much of the detail lost by mixing two stroke textures is restored (0 to 1).
     pub detail: f32,
+    /// `blend = "layered"` only: the scale that separates shading from detail, as a fraction of
+    /// the larger frame side. The base (shading and shadows) is crossfaded and only the finer
+    /// detail is selected, so soft shadows keep their soft edges. 0 is the crossfade.
+    pub shading_scale: f32,
 }
 
 impl Default for Blending {
@@ -408,6 +413,7 @@ impl Default for Blending {
             temporal_prior: b.temporal_prior,
             data_weight: b.data_weight,
             detail: b.detail,
+            shading_scale: b.shading_scale,
         }
     }
 }
@@ -420,6 +426,7 @@ impl Blending {
             temporal_prior: self.temporal_prior,
             data_weight: self.data_weight,
             detail: self.detail,
+            shading_scale: self.shading_scale,
         }
     }
 }
