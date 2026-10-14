@@ -12,6 +12,17 @@ cargo build --release
 
 License: GPL-3.0-or-later.
 
+## Patents
+
+FreeSynth's patch search uses the PatchMatch algorithm, which in the United States is covered by
+Adobe patents, including US 8,861,869. Some of the other techniques it uses may also be patented.
+
+The GPL-3.0 license covers copyright. It does not grant you a license to patents held by third
+parties such as Adobe, and building or distributing FreeSynth does not clear you of patent
+obligations. Checking that your use does not infringe anyone's patents is your own responsibility.
+This note is not legal advice; if you intend to ship FreeSynth in a product or use it in the United
+States, talk to a patent attorney.
+
 ## Command line
 
 `freesynth` accepts the options of the 2019 `ebsynth` tool:
@@ -79,8 +90,10 @@ target/release/freesynth video -i clip.mov --key 0=paint_000.png --key 99=paint_
 Each keyframe is propagated forward and backward up to its neighbouring keyframes. The guides come
 from the input frames, from position fields built with `freesynth-flow`, and from the previous
 output frame; the positional guide is weighted by how reliably each pixel was tracked. Where two
-keyframes overlap, the passes are blended in the gradient domain, preferring at each pixel the pass
-with the lower patch error; `--blend linear` crossfades instead. Video files are read and written
+keyframes overlap, the passes are blended: the broad shading is crossfaded, and the finer detail is
+taken per pixel from the pass with the lower patch error, so soft shadows stay soft. `--blend
+adaptive` selects the detail at every scale instead (sharper), and `--blend linear` crossfades the
+whole frame. Video files are read and written
 through ffmpeg, which must be installed, and their colour tags are kept. `--bit-depth 16` writes
 16-bit output.
 
