@@ -95,6 +95,12 @@ pub use crate::render::{Keyframe, Keyframe16, RenderStats, Renderer, Shot};
 pub use crate::resources::{ResourcePlan, ShotFormat, default_memory_budget};
 pub use crate::store::{SpillKey, SpillStore, StoreStats};
 
+/// Revision of how this crate renders frames. Bump it whenever a change to synthesis, flow, the
+/// guides or the blend alters rendered frames without a visible change to [`VideoParams`], so that
+/// a cache keyed on the parameters does not reuse frames from an earlier build. It lives with the
+/// rendering code (rather than in the host) so the bump is next to the change that needs it.
+pub const OUTPUT_REVISION: u32 = 1;
+
 #[cfg(test)]
 pub(crate) mod test_util {
     use std::path::PathBuf;

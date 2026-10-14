@@ -24,11 +24,10 @@ use crate::output::{OutputFrames, ProjectSink, Ready, VideoJob};
 use crate::project::Project;
 use crate::session::Session;
 
-/// Revision of how FreeSynth renders frames, part of every frame's cache key. Bump it whenever
-/// a change to the engines (synthesis, flow, the video pipeline) alters rendered frames without
-/// changing [`VideoParams`], so that frames rendered by an earlier build are not reused. (The
-/// layout of the cache itself has its own version, `MANIFEST_VERSION` in the cache module.)
-const OUTPUT_REVISION: u32 = 1;
+// Revision of how FreeSynth renders frames, part of every frame's cache key. It is owned by
+// freesynth-video (so the bump lives next to the rendering code it tracks); the cache layout has
+// its own version, MANIFEST_VERSION in the cache module.
+use freesynth_video::OUTPUT_REVISION;
 
 /// What to bring up to date in a project render. New fields may be added: build it from
 /// [`RenderRequest::default`] and set the fields you need.
