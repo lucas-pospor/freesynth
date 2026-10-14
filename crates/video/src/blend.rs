@@ -52,15 +52,15 @@ pub enum BlendMode {
     /// Soft per-pixel selection of the pass with the lower synthesis error, blended in the
     /// gradient domain ([`BlendSettings`]; see [`BlendMode`]). Keeps the
     /// passes' detail without doubled structures. Needs the engine's per-pixel errors, which the
-    /// renderer requests for the passes it blends. The default.
-    #[default]
+    /// renderer requests for the passes it blends.
     Adaptive,
     /// Like [`Adaptive`](BlendMode::Adaptive), but only the fine detail is error-selected: each
     /// pass is split into a base (shading and shadows, Gaussian [`BlendSettings::shading_scale`])
     /// and a detail residual (the strokes). The base is crossfaded, so soft shadows stay soft
     /// instead of taking one pass's hard edge ("looking like an object"), while the detail is
     /// selected per pixel like the adaptive blend. No gradient-domain solve, so it is also cheaper.
-    /// Also needs the engine's per-pixel errors.
+    /// Also needs the engine's per-pixel errors. The default.
+    #[default]
     Layered,
 }
 

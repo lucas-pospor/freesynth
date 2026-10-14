@@ -92,7 +92,7 @@ fn new_then_render_incrementally() {
     assert!(project.contains("frames = \"scene/frames\"") && project.contains("image = \"scene/keys/00004.png\""));
     assert!(project.contains("frames = \"shot-out/[#####].png\""), "{project}");
     // New projects get the recommended look, written out so that it can be edited.
-    assert!(project.contains("blend = \"adaptive\"") && project.contains("gate_mapping = true"), "{project}");
+    assert!(project.contains("blend = \"layered\"") && project.contains("gate_mapping = true"), "{project}");
     // Refuses to overwrite.
     let again = s.run(&["new", "shot.fsyn", "--input", "scene/frames", "--keys", "scene/keys"]);
     assert_eq!(again.status.code(), Some(2));

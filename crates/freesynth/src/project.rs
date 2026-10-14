@@ -47,7 +47,7 @@
 //! bit_depth = 8                # 8 or 16 (16 needs PNG frames)
 //! codec = "auto"               # auto (by extension), prores, prores4444, h264, h265, ffv1, png, vp9
 //! # quality = 16               # CRF of h264, h265 and vp9
-//! blend = "adaptive"           # or "linear" (crossfade), or "layered" (soft shading + detail)
+//! blend = "layered"            # the default; or "adaptive" (sharper) or "linear" (crossfade)
 //! keyframes = "synthesized"    # or "painting"
 //!
 //! [blending]                   # tuning of the adaptive and layered blends
@@ -383,7 +383,7 @@ impl Default for EngineSettings {
     }
 }
 
-/// Tuning of the adaptive blend (`output.blend = "adaptive"`); see [`BlendSettings`].
+/// Tuning of the adaptive and layered blends (`output.blend`); see [`BlendSettings`].
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Blending {
@@ -451,9 +451,10 @@ pub struct OutputSettings {
     /// Constant-quality factor (CRF) for H.264, H.265 and VP9 (lower is better).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quality: Option<u32>,
-    /// How the two passes of a keyframe interval are combined: `adaptive` (the default:
-    /// per-pixel selection by synthesis error, blended in the gradient domain; tuned in
-    /// `[blending]`) or `linear` (crossfade).
+    /// How the two passes of a keyframe interval are combined: `layered` (the default: the
+    /// shading crossfaded and the fine detail selected per pixel by synthesis error),
+    /// `adaptive` (selection across all frequencies, sharper) or `linear` (crossfade). The
+    /// `adaptive` and `layered` blends are tuned in `[blending]`.
     #[serde(with = "by_name")]
     pub blend: BlendMode,
     /// What to write at keyframe frames: `synthesized` or `painting`.
@@ -1000,7 +1001,7 @@ mod tests {
         assert_eq!(Project::from_json(&p.to_json(), "").unwrap(), p);
         // The default project writes the recommended look out in full, so it can be edited.
         let text = Project::new("f", "o").to_toml();
-        for field in ["gate_mapping = true", "blend = \"adaptive\"", "softness = 0.33", "warm_start = false"] {
+        for field in ["gate_mapping = true", "blend = \"layered\"", "softness = 0.33", "warm_start = false"] {
             assert!(text.contains(field), "{field} in {text}");
         }
         // Bad values fail validation or the parse.

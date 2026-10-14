@@ -158,9 +158,9 @@ struct LookArgs {
     /// Random seed.
     #[arg(long, value_name = "N")]
     seed: Option<u32>,
-    /// How the two passes between keyframes are combined: adaptive (default; keeps detail),
-    /// layered (soft shading plus detail) or linear (crossfade).
-    #[arg(long, value_name = "adaptive|layered|linear")]
+    /// How the two passes between keyframes are combined: layered (default; soft shading plus
+    /// detail), adaptive (sharper) or linear (crossfade).
+    #[arg(long, value_name = "layered|adaptive|linear")]
     blend: Option<BlendMode>,
     /// Also weight the temporal guide by flow consistency (helps with occlusions; slower).
     #[arg(long)]

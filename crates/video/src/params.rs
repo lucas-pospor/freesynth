@@ -125,7 +125,7 @@ pub struct VideoParams {
     pub temporal_gate_erosion: usize,
     /// How the two passes of an interval are combined.
     pub blend: BlendMode,
-    /// Settings of the adaptive blend ([`BlendMode::Adaptive`]).
+    /// Settings of the adaptive and layered blends ([`BlendMode`]).
     pub blending: BlendSettings,
     /// What is written at keyframe frames.
     pub keyframe_output: KeyframeOutput,
@@ -177,12 +177,13 @@ impl VideoParams {
 
 impl Default for VideoParams {
     /// The recommended look: the classic guide weights with the mapping guide gated by the
-    /// tracker's confidence, and the [adaptive](BlendMode::Adaptive) blend between passes.
+    /// tracker's confidence, and the [layered](BlendMode::Layered) blend between passes.
     /// Compared with [`classic`](VideoParams::classic) it keeps the style attached to tracked
     /// content without dragging it into regions whose track was lost, and it keeps the passes'
-    /// detail in the middle of keyframe intervals instead of crossfading it away.
+    /// detail in the middle of keyframe intervals instead of crossfading it away, while keeping
+    /// soft shadows soft.
     fn default() -> Self {
-        Self { gate_mapping: true, blend: BlendMode::Adaptive, ..Self::classic() }
+        Self { gate_mapping: true, blend: BlendMode::Layered, ..Self::classic() }
     }
 }
 
@@ -253,7 +254,7 @@ mod tests {
         let d = VideoParams::default();
         d.validate().unwrap();
         assert!(d.gate_mapping && !d.gate_temporal);
-        assert_eq!(d.blend, BlendMode::Adaptive);
+        assert_eq!(d.blend, BlendMode::Layered);
         let p = VideoParams::classic();
         p.validate().unwrap();
         assert!(!p.gate_mapping && p.blend == BlendMode::Linear);
